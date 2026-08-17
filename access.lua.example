@@ -1,0 +1,18 @@
+-- MA-RFW (MoeArt Replay Firewall / 萌艺科技重放攻击防火墙)
+-- 开发组织: 萌艺科技 MASEC 项目组 (MoeArt Inc, MA-SEC Team)
+-- access 阶段: 每请求调用一次 ma_rfw.check()。
+-- 生效范围由插件 run() 内部按 $rfw_on 标记判断(见 ma_rfw.lua):
+--   未打 set $rfw_on 1; 标记的 location / 站点一律跳过(状态页除外)。
+-- 本文件只需一行调用, 其它判定(标记/状态页/校验/封禁)全部在插件内部完成。
+--
+-- nginx.conf 用法:
+--   server { ...                       -- 业务站点
+--     set $rfw_on 1;                   -- (可选)整个 server 都处理
+--     location /api/ { set $rfw_on 1; ... }            -- 或只处理某个 location
+--     location /internal/upstream/ { ... }             -- 未标记 → 自动跳过
+--   }
+--   server { ...                       -- 内部转发落点(proxy_pass 目标)
+--     # 不要打标记 → 该段请求不重复校验 nonce
+--   }
+ma_rfw = ma_rfw or require("ma_rfw")
+ma_rfw.check()

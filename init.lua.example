@@ -1,0 +1,4 @@
+-- MA-RFW (MoeArt Replay Firewall / 萌艺科技重放攻击防火墙)
+-- 开发组织: 萌艺科技 MASEC 项目组 (MoeArt Inc, MA-SEC Team)
+-- init 阶段加载: 只做纯 Lua 初始化, 不碰请求上下文。lua_code_cache 必须 on。
+ma_rfw = require("ma_rfw")
