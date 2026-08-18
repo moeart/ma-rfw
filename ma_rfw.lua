@@ -34,7 +34,44 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
-ngx.log(ngx.ERR, "ma_rfw: module loaded, plugin_dir=" .. plugin_dir)
+local LOG_DIR = plugin_dir .. "/logs"
+local rfw_log_file = nil
+local rfw_debug_file = nil
+
+local function ensure_log_dir()
+    local probe = LOG_DIR .. "/.rfw"
+    local fd = io.open(probe, "w")
+    if fd then fd:close(); os.remove(probe); return end
+    os.execute("mkdir -p " .. LOG_DIR)
+    os.execute("mkdir " .. LOG_DIR)
+end
+
+local function rfw_log(tag, msg)
+    local today = os.date("%Y_%m_%d")
+    local log_path = LOG_DIR .. "/rfw_" .. today .. ".log"
+    local ts = os.date("%Y-%m-%d %H:%M:%S")
+    local line = ts .. " [" .. tag .. "] " .. msg .. "\n"
+    local fd = io.open(log_path, "a")
+    if fd then
+        fd:write(line)
+        fd:close()
+    end
+end
+
+local function rfw_debug(msg)
+    if not DEBUG then return end
+    local today = os.date("%Y_%m_%d")
+    local log_path = LOG_DIR .. "/rfw_" .. today .. "_debug.log"
+    local ts = os.date("%Y-%m-%d %H:%M:%S")
+    local line = ts .. " " .. msg .. "\n"
+    local fd = io.open(log_path, "a")
+    if fd then
+        fd:write(line)
+        fd:close()
+    end
+end
+
+ensure_log_dir()
 
 local ngx_now  = ngx.now
 local ngx_time = ngx.time
@@ -80,7 +117,7 @@ local MKEY_PREFIX = sd_config.key_prefix or "rfw:"
 
 local store = ngx.shared[DICT_NAME]
 if not store then
-    ngx.log(ngx.ERR, "ma_rfw: ngx.shared." .. DICT_NAME .. " 不存在, " ..
+    rfw_log("ERROR", "ngx.shared." .. DICT_NAME .. " 不存在, " ..
         "请在 nginx.conf 添加: lua_shared_dict " .. DICT_NAME .. " 64m;")
 end
 
@@ -252,7 +289,7 @@ end
 
 local function deny(reason, detail)
     incr_stat("denied:" .. reason, 1)
-    ngx.log(ngx.ERR, "ma_rfw: deny(" .. tostring(reason) .. ") uri=" .. ngx.var.uri ..
+    rfw_log("DENY", "reason=" .. tostring(reason) .. " uri=" .. ngx.var.uri ..
         " ip=" .. ngx.var.remote_addr)
     load_html()
     ngx.status = ngx.HTTP_FORBIDDEN
@@ -682,7 +719,7 @@ local function verify_sign()
         return deny("sign-ratio-low", d)
     end
     incr_stat("signed_ok", 1)
-    if DEBUG then ngx.log(ngx.ERR, "ma_rfw: sign ok method=" .. m .. " uri=" .. uri) end
+    rfw_debug("sign ok method=" .. m .. " uri=" .. uri)
     return nil
 end
 
@@ -708,7 +745,7 @@ function _M.run()
         if ctx.rfw_running then return end
         ctx.rfw_running = true
     end
-    if DEBUG then ngx.log(ngx.ERR, "ma_rfw: enter uri=" .. uri) end
+    rfw_debug("enter uri=" .. uri)
 
     incr_stat("requests", 1)
 
@@ -892,7 +929,7 @@ function _M.run()
             return deny("cookie-ratio-low", d)
         end
         incr_stat("cookie_ok", 1)
-        if DEBUG then ngx.log(ngx.ERR, "ma_rfw: cookie ok seq=" .. seq .. " uri=" .. uri) end
+        rfw_debug("cookie ok seq=" .. seq .. " uri=" .. uri)
         return
     end
 
