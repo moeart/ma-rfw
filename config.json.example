@@ -58,8 +58,14 @@
     "___sweep": "后台清扫间隔(秒)",
     "sweep_interval": 60,
 
+    "___snap_log": "SNAP 快照日志落盘间隔(秒), 0 = 每次清扫都写; 建议 1800(半小时) / 3600(1小时)",
+    "snap_log_interval": 1800,
+
     "___admin_whitelist": "管理面板访问白名单(留空 = 允许所有)",
     "admin_whitelist": ["127.0.0.1", "::1"],
+
+    "___admin_trusted_proxies": "受信任反代 IP 列表(仅当 direct IP 在此列表才解析 XFF, 留空=从不信任头部)",
+    "admin_trusted_proxies": [],
 
     "___debug": "调试模式",
     "debug": false

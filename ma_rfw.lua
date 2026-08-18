@@ -35,40 +35,76 @@ do
 end
 
 local LOG_DIR = plugin_dir .. "/logs"
-local rfw_log_file = nil
-local rfw_debug_file = nil
 
 local function ensure_log_dir()
     local probe = LOG_DIR .. "/.rfw"
     local fd = io.open(probe, "w")
     if fd then fd:close(); os.remove(probe); return end
-    os.execute("mkdir -p " .. LOG_DIR)
-    os.execute("mkdir " .. LOG_DIR)
+    local sep = package.config:sub(1, 1)
+    if sep == "\\" then
+        os.execute('mkdir "' .. LOG_DIR:gsub("/", "\\") .. '"')
+    else
+        os.execute("mkdir -p " .. LOG_DIR)
+    end
+    local fd2 = io.open(probe, "w")
+    if fd2 then fd2:close(); os.remove(probe) end
 end
 
-local function rfw_log(tag, msg)
-    local today = os.date("%Y_%m_%d")
-    local log_path = LOG_DIR .. "/rfw_" .. today .. ".log"
-    local ts = os.date("%Y-%m-%d %H:%M:%S")
-    local line = ts .. " [" .. tag .. "] " .. msg .. "\n"
-    local fd = io.open(log_path, "a")
-    if fd then
-        fd:write(line)
-        fd:close()
+-- JSON 日志: 与 WAF (moewaf/util.lua log_record) 同一结构, 每行一个 JSON 对象:
+-- {client_ip, local_time, server_name, user_agent, attack_method, req_url, req_data, rule_tag}
+-- attack_method 为具体事件(DENY 记录=拒绝原因 / SNAP / ERROR / DEBUG)
+local function rfw_log(tag, msg, rule_tag)
+    local r = {}
+    pcall(function()
+        r.client_ip = ngx.var.remote_addr
+        r.server_name = ngx.var.server_name
+        r.user_agent = ngx.var.http_user_agent
+        r.req_url = ngx.var.request_uri
+    end)
+    local lts
+    local ok, t = pcall(ngx.localtime)
+    if ok and type(t) == "string" then
+        lts = t
+    else
+        lts = os.date("%Y-%m-%d %H:%M:%S")
+    end
+    local obj = {
+        client_ip = r.client_ip or "-",
+        local_time = lts,
+        server_name = r.server_name or "-",
+        user_agent = r.user_agent or "-",
+        attack_method = tag,
+        req_url = r.req_url or "-",
+        req_data = msg or "-",
+        rule_tag = rule_tag or "-",
+    }
+    local line
+    local ok2, enc = pcall(cjson.encode, obj)
+    if ok2 then
+        line = enc
+    else
+        line = lts .. " [" .. tag .. "] " .. tostring(msg or "-")
+    end
+    if tag ~= "DEBUG" then
+        local log_path = LOG_DIR .. "/rfw_" .. os.date("%Y-%m-%d") .. ".log"
+        local fd = io.open(log_path, "a")
+        if fd then
+            fd:write(line .. "\n")
+            fd:close()
+        end
+    end
+    if tag == "ERROR" or tag == "DEBUG" then
+        local fd = io.open(LOG_DIR .. "/rfw.error.log", "a")
+        if fd then
+            fd:write(line .. "\n")
+            fd:close()
+        end
     end
 end
 
 local function rfw_debug(msg)
-    if not DEBUG then return end
-    local today = os.date("%Y_%m_%d")
-    local log_path = LOG_DIR .. "/rfw_" .. today .. "_debug.log"
-    local ts = os.date("%Y-%m-%d %H:%M:%S")
-    local line = ts .. " " .. msg .. "\n"
-    local fd = io.open(log_path, "a")
-    if fd then
-        fd:write(line)
-        fd:close()
-    end
+    if not config.debug then return end
+    rfw_log("DEBUG", msg)
 end
 
 ensure_log_dir()
@@ -154,7 +190,7 @@ local function init_shared_stats()
         "no_cookie_tracked", "cookie_missing", "cookie_replay",
         "cookie_stale", "static_ok", "blocked_hit", "failures",
         "blocks", "backend_fail", "track_ips", "block_cache_size",
-        "seq_cache_size", "last_rate",
+        "seq_cache_size", "last_rate", "snap_log_ts", "denied_total",
     }) do
         store:add(STATS_PREFIX .. k, 0, 0)
     end
@@ -228,6 +264,7 @@ local REPLAY_ENABLED = config.replay_enabled
 local BLOCK_CACHE_TTL = config.block_cache_ttl or 60
 local SIGN_WINDOW = config.sign_window or 60
 local SWEEP_INTERVAL = config.sweep_interval
+local SNAP_LOG_INTERVAL = config.snap_log_interval or 1800
 local COOKIE_MISS_MAX = config.cookie_missing_max or 0
 local MISS_TTL = config.cookie_missing_ttl or 86400
 local COOKIE_TS_MAX = config.cookie_ts_max or 0
@@ -289,8 +326,17 @@ end
 
 local function deny(reason, detail)
     incr_stat("denied:" .. reason, 1)
-    rfw_log("DENY", "reason=" .. tostring(reason) .. " uri=" .. ngx.var.uri ..
-        " ip=" .. ngx.var.remote_addr)
+    incr_stat("denied_total", 1)
+    local data
+    if detail and #detail > 0 then
+        local parts = {}
+        for i = 1, #detail do
+            parts[#parts + 1] = detail[i][1] .. "=" .. tostring(detail[i][2])
+        end
+        data = table.concat(parts, " ")
+        if #data > 500 then data = data:sub(1, 500) .. "..." end
+    end
+    rfw_log(reason, data, ngx_req.get_method())
     load_html()
     ngx.status = ngx.HTTP_FORBIDDEN
     ngx.header["Content-Type"] = "text/html; charset=utf-8"
@@ -410,14 +456,20 @@ sweep = function()
         set_stat("prev_requests", req_now)
     end
 
-    -- 清理 denied 计数器 (读取当前值累加后删除, 下次 sweep 重新计数)
+    -- SNAP: 累计快照, 每 snap_log_interval 秒最多落盘一次 (0 = 每次 sweep 都写)
     if store then
-        local keys = store:get_keys(512)
-        local denied_prefix = STATS_PREFIX .. "denied:"
-        for _, k in ipairs(keys) do
-            if k:sub(1, #denied_prefix) == denied_prefix then
-                store:delete(k)
+        local snap_interval = SNAP_LOG_INTERVAL
+        local last_snap = get_stat("snap_log_ts")
+        if snap_interval <= 0 or (ngx_time() - last_snap) >= snap_interval then
+            local snap_parts = {}
+            local snap_keys = {"requests","signed_ok","cookie_ok","cookie_issued",
+                               "static_ok","blocked_hit","cookie_replay","cookie_stale",
+                               "failures","blocks","denied_total"}
+            for _, k in ipairs(snap_keys) do
+                snap_parts[#snap_parts+1] = k .. "=" .. get_stat(k)
             end
+            rfw_log("SNAP", table.concat(snap_parts, " "))
+            set_stat("snap_log_ts", ngx_time())
         end
     end
 
