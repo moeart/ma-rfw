@@ -17,24 +17,30 @@ end
 
 local _M = {}
 
+local cjson = require("cjson")
 local src = debug.getinfo(1, "S").source
 local plugin_dir = (src:sub(1, 1) == "@" and src:sub(2) or src):match("^(.*)[/\\][^/\\]+$") or "."
-local config = dofile(plugin_dir .. "/config.lua")
 local sha = dofile(plugin_dir .. "/sha256.lua")
 
-local status = {}
+local config
 do
-    local ok, mod = pcall(dofile, plugin_dir .. "/status.lua")
-    if ok and type(mod) == "table" and type(mod.render) == "function" then
-        status = mod
-    else
-        status.render = function()
-            ngx.header["Content-Type"] = "text/plain; charset=utf-8"
-            ngx.say("ma_rfw: status page unavailable")
-            ngx.exit(ngx.HTTP_OK)
-        end
+    local f = io.open(plugin_dir .. "/config.json", "r")
+    if not f then error("ma_rfw: config.json not found: " .. plugin_dir) end
+    local content = f:read("*a"); f:close()
+    config = cjson.decode(content)
+    for k in pairs(config) do
+        if k:sub(1, 3) == "___" then config[k] = nil end
     end
+    config.html_file = plugin_dir .. "/blocked.html"
 end
+
+local status = {
+    render = function()
+        ngx.header["Content-Type"] = "text/plain; charset=utf-8"
+        ngx.say("ma_rfw: status page has moved to /cgi-rfw/status")
+        ngx.exit(ngx.HTTP_OK)
+    end
+}
 
 ngx.log(ngx.ERR, "ma_rfw: module loaded, plugin_dir=" .. plugin_dir)
 
@@ -90,6 +96,41 @@ local function key_for(kind, name)
     return MKEY_PREFIX .. kind .. ":" .. name
 end
 
+-- ===== 统计计数: 使用 shared dict 实现跨 worker 聚合 =====
+local STATS_PREFIX = MKEY_PREFIX .. "stats:"
+
+local function incr_stat(k, delta)
+    if not store then return 0 end
+    local v = store:incr(STATS_PREFIX .. k, delta or 1, 0)
+    return v or 0
+end
+
+local function set_stat(k, val)
+    if store then store:set(STATS_PREFIX .. k, val, 0) end
+end
+
+local function get_stat(k)
+    if not store then return 0 end
+    return store:get(STATS_PREFIX .. k) or 0
+end
+
+local function init_shared_stats()
+    if not store then return end
+    if not store:add(STATS_PREFIX .. "start_ts", os.time(), 0) then
+        -- 已存在, 不覆盖
+    end
+    store:add(STATS_PREFIX .. "prev_requests", 0, 0)
+    for _, k in ipairs({
+        "requests", "signed_ok", "cookie_ok", "cookie_issued",
+        "no_cookie_tracked", "cookie_missing", "cookie_replay",
+        "cookie_stale", "static_ok", "blocked_hit", "failures",
+        "blocks", "backend_fail", "track_ips", "block_cache_size",
+        "seq_cache_size", "last_rate",
+    }) do
+        store:add(STATS_PREFIX .. k, 0, 0)
+    end
+end
+
 local function ip_key(ip)
     return ip
 end
@@ -98,33 +139,49 @@ local function nonce_key(ip, nonce)
     return ip .. "|" .. nonce
 end
 
--- ===== 状态计数 =====
-local stats = {
-    start_ts = os.time(),
-    requests = 0,
-    prev_requests = 0,
-    last_rate = 0,
-    signed_ok = 0,
-    cookie_ok = 0,
-    cookie_issued = 0,
-    no_cookie_tracked = 0,
-    cookie_missing = 0,
-    cookie_replay = 0,
-    cookie_stale = 0,
-    static_ok = 0,
-    blocked_hit = 0,
-    failures = 0,
-    blocks = 0,
-    backend_fail = 0,
-    track_ips = 0,
-    block_cache_size = 0,
-    seq_cache_size = 0,
-    denied = {},
+-- ===== 状态计数 (通过 shared dict 跨 worker 聚合) =====
+local stats = {}
+local stats_mt = {
+    __index = function(_, k)
+        if k == "denied" then return {} end
+        return get_stat(k)
+    end,
+    __newindex = function(_, k, v)
+        if k == "denied" then return end
+        set_stat(k, v)
+    end,
 }
+setmetatable(stats, stats_mt)
 
 local PENALTY_HTML
 local block_cache = {}
-local block_log = {}
+local block_log = nil  -- 不再使用 local table, 改为扫描 shared dict
+
+local function scan_block_log()
+    if not store then return {} end
+    local result = {}
+    local now = ngx_time()
+    local prefix = key_for("block", "")
+    local keys = store:get_keys(1024)
+    for _, k in ipairs(keys) do
+        if k:sub(1, #prefix) == prefix then
+            local ip = k:sub(#prefix + 1)
+            local v = store:get(k)
+            if v then
+                local until_ts, ban_ts, reason = v:match("^(%d+)%|(%d+)%|(.-)$")
+                if until_ts then until_ts = tonumber(until_ts) end
+                if until_ts and now < until_ts then
+                    result[ip] = {
+                        unblock = until_ts,
+                        ban = (ban_ts and tonumber(ban_ts)) or until_ts,
+                        reason = (reason and reason ~= "" and reason) or "unknown",
+                    }
+                end
+            end
+        end
+    end
+    return result
+end
 local initialized = false
 
 local ratio_track = {}
@@ -202,7 +259,7 @@ local function debug_panel(reason, detail)
 end
 
 local function deny(reason, detail)
-    stats.denied[reason] = (stats.denied[reason] or 0) + 1
+    incr_stat("denied:" .. reason, 1)
     ngx.log(ngx.ERR, "ma_rfw: deny(" .. tostring(reason) .. ") uri=" .. ngx.var.uri ..
         " ip=" .. ngx.var.remote_addr)
     load_html()
@@ -230,8 +287,7 @@ local function set_block(ip, reason)
     store:set(key_for("block", key),
         tostring(until_ts) .. "|" .. tostring(now) .. "|" .. tostring(reason or ""),
         config.block_time + 10)
-    block_log[ip] = { unblock = until_ts, ban = now, reason = tostring(reason or "") }
-    stats.blocks = stats.blocks + 1
+    incr_stat("blocks", 1)
 end
 
 local function is_blocked(ip)
@@ -252,14 +308,8 @@ local function is_blocked(ip)
         if until_ts then
             if until_ts > now then
                 blocked = true
-                block_log[ip] = {
-                    unblock = until_ts,
-                    ban = (b and tonumber(b)) or until_ts,
-                    reason = (r and r ~= "" and r) or "unknown",
-                }
             else
                 store:delete(key_for("block", key))
-                block_log[ip] = nil
             end
         end
     end
@@ -268,21 +318,11 @@ local function is_blocked(ip)
 end
 
 local function prune_block_log()
+    -- block_log 现在通过 scan_block_log() 从 shared dict 实时扫描
+    -- 此函数仅清理 local block_cache 中的过期条目
     local now = ngx_time()
-    local oldest, oldest_ip
-    for ip, e in pairs(block_log) do
-        if now >= e.unblock then block_log[ip] = nil
-        elseif oldest == nil or e.unblock < oldest then oldest, oldest_ip = e.unblock, ip end
-    end
-    local n = 0
-    for _ in pairs(block_log) do n = n + 1 end
-    while n > 512 and oldest_ip do
-        block_log[oldest_ip] = nil
-        n = n - 1
-        oldest, oldest_ip = nil, nil
-        for ip, e in pairs(block_log) do
-            if oldest == nil or e.unblock < oldest then oldest, oldest_ip = e.unblock, ip end
-        end
+    for k, c in pairs(block_cache) do
+        if now >= c.exp then block_cache[k] = nil end
     end
 end
 
@@ -307,7 +347,7 @@ local function record_failure(ip, reason)
     else
         store:set(path, tostring(first) .. "," .. tostring(n), config.fail_window + 10)
     end
-    stats.failures = stats.failures + 1
+    incr_stat("failures", 1)
 end
 
 local sweep
@@ -328,10 +368,30 @@ sweep = function()
     if store then store:delete("rfw_sweep_guard") end
     SWEEP_SCHEDULED = false
 
-    local req_now = stats.requests
-    stats.last_rate = math.floor(((req_now - stats.prev_requests) / SWEEP_INTERVAL) * 10) / 10
-    stats.prev_requests = req_now
-    stats.denied = {}
+    -- 使用 shared dict 计算全局限速率
+    local req_now = get_stat("requests")
+    local prev = get_stat("prev_requests")
+    if prev == 0 and req_now > 0 then
+        -- 首次 sweep, prev_requests 尚未初始化
+        set_stat("prev_requests", req_now)
+        set_stat("last_rate", 0)
+    else
+        local rate = math.floor(((req_now - prev) / SWEEP_INTERVAL) * 10) / 10
+        set_stat("last_rate", rate)
+        set_stat("prev_requests", req_now)
+    end
+
+    -- 清理 denied 计数器 (读取当前值累加后删除, 下次 sweep 重新计数)
+    if store then
+        local keys = store:get_keys(512)
+        local denied_prefix = STATS_PREFIX .. "denied:"
+        for _, k in ipairs(keys) do
+            if k:sub(1, #denied_prefix) == denied_prefix then
+                store:delete(k)
+            end
+        end
+    end
+
     prune_block_log()
 
     local now = ngx_time()
@@ -341,11 +401,13 @@ sweep = function()
     for k, c in pairs(seq_cache) do
         if now - c.ts >= SEQ_CACHE_TTL then seq_cache[k] = nil end
     end
-    stats.track_ips = sign_ratio_entries
-    stats.block_cache_size = 0
-    for _ in pairs(block_cache) do stats.block_cache_size = stats.block_cache_size + 1 end
-    stats.seq_cache_size = 0
-    for _ in pairs(seq_cache) do stats.seq_cache_size = stats.seq_cache_size + 1 end
+    set_stat("track_ips", sign_ratio_entries)
+    local bcs = 0
+    for _ in pairs(block_cache) do bcs = bcs + 1 end
+    set_stat("block_cache_size", bcs)
+    local scs = 0
+    for _ in pairs(seq_cache) do scs = scs + 1 end
+    set_stat("seq_cache_size", scs)
 
     ratio_track = {}; ratio_entries = 0
     replay_track = {}; replay_entries = 0
@@ -421,7 +483,7 @@ end
 
 local function cookie_missing_track(ip)
     if COOKIE_MISS_MAX <= 0 then return true end
-    stats.no_cookie_tracked = stats.no_cookie_tracked + 1
+    incr_stat("no_cookie_tracked", 1)
     local now = ngx_time()
     local key = ip_key(ip)
     local path = key_for("miss", key)
@@ -436,7 +498,7 @@ local function cookie_missing_track(ip)
     if n > COOKIE_MISS_MAX then
         set_block(ip, "cookie-missing-quota")
         store:delete(path)
-        stats.cookie_missing = stats.cookie_missing + 1
+        incr_stat("cookie_missing", 1)
         return false
     end
     store:set(path, tostring(first) .. "," .. tostring(n), MISS_TTL + 10)
@@ -627,7 +689,7 @@ local function verify_sign()
         detail_add(d, "total_in_window", tostring(tot))
         return deny("sign-ratio-low", d)
     end
-    stats.signed_ok = stats.signed_ok + 1
+    incr_stat("signed_ok", 1)
     if DEBUG then ngx.log(ngx.ERR, "ma_rfw: sign ok method=" .. m .. " uri=" .. uri) end
     return nil
 end
@@ -635,9 +697,16 @@ end
 function _M.run()
     local uri = ngx_var.uri
 
-    if config.status_enabled ~= false and uri == config.status_path then
-        prune_block_log()
-        return status.render(config, stats, nil, sd_config, block_log)
+    if uri:sub(1, 8) == "/cgi-rfw" then
+        local f = loadfile(plugin_dir .. "/webui.lua")
+        if f then
+            local cgi = f()
+            if cgi and cgi.run then return cgi.run() end
+        end
+        ngx.status = 500
+        ngx.header["Content-Type"] = "text/plain; charset=utf-8"
+        ngx.say("webui module not found")
+        return ngx.exit(500)
     end
 
     if (ngx_var.rfw_on or "") ~= "1" then return end
@@ -649,24 +718,25 @@ function _M.run()
     end
     if DEBUG then ngx.log(ngx.ERR, "ma_rfw: enter uri=" .. uri) end
 
-    stats.requests = stats.requests + 1
+    incr_stat("requests", 1)
 
     if not config.secret then return deny("no-secret") end
 
     if not initialized then
         initialized = true
+        init_shared_stats()
         if not schedule_sweep() then initialized = false end
     end
 
     if not store then
-        stats.backend_fail = (stats.backend_fail or 0) + 1
+        incr_stat("backend_fail", 1)
         return deny("backend-unreachable")
     end
 
     local ip = ngx_var.remote_addr or ""
     local blocked, buntil = is_blocked(ip)
     if blocked then
-        stats.blocked_hit = stats.blocked_hit + 1
+        incr_stat("blocked_hit", 1)
         local d = mk_detail()
         detail_add(d, "block_until_ts", tostring(buntil or 0))
         detail_add(d, "remaining_s", tostring(math.max(0, (buntil or 0) - ngx_time())))
@@ -674,7 +744,7 @@ function _M.run()
     end
 
     if is_static() then
-        stats.static_ok = stats.static_ok + 1
+        incr_stat("static_ok", 1)
         return
     end
 
@@ -731,7 +801,7 @@ function _M.run()
     if not v then
         if COOKIE_BOOTSTRAP then
             issue_cookie()
-            stats.cookie_issued = stats.cookie_issued + 1
+            incr_stat("cookie_issued", 1)
         end
         local r, okc, tot = track_cookie(ip, false)
         if r then
@@ -765,10 +835,10 @@ function _M.run()
         end
         if COOKIE_TS_MAX > 0 and age_ms > COOKIE_TS_MAX * 1000 then
             record_failure(ip, "cookie-stale")
-            stats.cookie_stale = stats.cookie_stale + 1
+            incr_stat("cookie_stale", 1)
             if COOKIE_BOOTSTRAP and t < 100000000000 then
                 issue_cookie()
-                stats.cookie_issued = stats.cookie_issued + 1
+                incr_stat("cookie_issued", 1)
             end
             local d = mk_detail()
             detail_add(d, "sid", sid or "")
@@ -788,13 +858,13 @@ function _M.run()
                     detail_add(d, "total_in_window", tostring(tot))
                     return deny("cookie-ratio-low", d)
                 end
-                stats.cookie_ok = stats.cookie_ok + 1
+                incr_stat("cookie_ok", 1)
                 return
             end
             local cnt = (last_count or 1) + 1
             if COOKIE_REPLAY_MAX > 0 and cnt > COOKIE_REPLAY_MAX then
                 record_failure(ip, "cookie-replay")
-                stats.cookie_replay = stats.cookie_replay + 1
+                incr_stat("cookie_replay", 1)
                 local d = mk_detail()
                 detail_add(d, "sid", sid or "")
                 detail_add(d, "replay_count", tostring(cnt))
@@ -808,7 +878,7 @@ function _M.run()
                 detail_add(d, "total_in_window", tostring(tot))
                 return deny("cookie-ratio-low", d)
             end
-            stats.cookie_ok = stats.cookie_ok + 1
+            incr_stat("cookie_ok", 1)
             return
         end
 
@@ -829,7 +899,7 @@ function _M.run()
             detail_add(d, "total_in_window", tostring(tot))
             return deny("cookie-ratio-low", d)
         end
-        stats.cookie_ok = stats.cookie_ok + 1
+        incr_stat("cookie_ok", 1)
         if DEBUG then ngx.log(ngx.ERR, "ma_rfw: cookie ok seq=" .. seq .. " uri=" .. uri) end
         return
     end
@@ -839,7 +909,7 @@ function _M.run()
         local t = tonumber(ts0)
         if t and cookie_sig(ts0, nonce0) == sig0:lower() then
             issue_cookie()
-            stats.cookie_issued = stats.cookie_issued + 1
+            incr_stat("cookie_issued", 1)
             local r, okc, tot = track_cookie(ip, false)
             if r then
                 local d = mk_detail()
@@ -886,6 +956,9 @@ function _M.on_log()
     record_failure(ngx.var.remote_addr or "", "app-fail")
 end
 
+_M.stats = stats
+_M.block_log = scan_block_log
+_M.scan_block_log = scan_block_log
 _G.ma_rfw_core = _M
 
 local ok, phase = pcall(ngx.get_phase)

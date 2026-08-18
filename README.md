@@ -20,7 +20,7 @@ lua_shared_dict rfw 64m;
 | `ma_rfw.lua` | 主插件(访问阶段校验 + 日志阶段记失败), 每个 worker 只加载一次并缓存到 `_G` |
 | `config.lua` | 全部配置(密钥、阈值、状态页开关等) |
 | `sha256.lua` | 纯 Lua SHA256 / HMAC-SHA256, 含 `hmac_prepare` 密钥预计算(零外部依赖) |
-| `status.lua` | `/cgi-rfw/status` 状态页(HTML 表格), 缺失时主插件自动降级为纯文本提示 |
+| `cgi_rfw.lua` | 管理面板(状态统计/配置管理/IP检查), 通过 `/cgi-rfw/*` 路径访问 |
 | `blocked.html` | 封禁/拒绝时返回的 403 页面 |
 | `rfw.js` | 前端签名拦截器(覆盖 `fetch` 与 `XMLHttpRequest`, 同步 XHR 跳过) |
 | `example/nginx-sign.conf` | nginx 部署示例(注入 `rfw.js` + 挂载插件) |
@@ -149,7 +149,7 @@ GET/HEAD 且未带 `RFWDATA` 签名头、且扩展名在静态表 → 静态, �
 与本机其它插件统一走 `init_by_lua_file` + `access_by_lua_file`:
 
 1. 把插件文件覆盖到插件目录:
-   `ma_rfw.lua / config.lua / sha256.lua / status.lua / blocked.html`;
+   `ma_rfw.lua / config.lua / sha256.lua / cgi_rfw.lua / blocked.html`;
 2. nginx.conf 的 `http` 块添加:
    ```nginx
    lua_shared_dict rfw 64m;

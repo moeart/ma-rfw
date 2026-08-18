@@ -53,7 +53,7 @@ ngx.shared = {}
 _LOCAL_BASE = "''' + base + '''"
 _orig_dofile = dofile
 function dofile(path)
-    local p = string.gsub(path, "^D:/BtNginxLua/replayfirewall", _LOCAL_BASE)
+    local p = string.gsub(path, "^.*[/\\]replayfirewall", _LOCAL_BASE)
     return _orig_dofile(p)
 end
 
