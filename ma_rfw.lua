@@ -179,12 +179,62 @@ local function get_stat(k)
     return store:get(STATS_PREFIX .. k) or 0
 end
 
+-- ===== 统计持久化: nginx 重启后恢复计数, 保证当日累计跨重启连续 =====
+local STATS_FILE = plugin_dir .. "/rfw_stats.json"
+local PERSIST_KEYS = {
+    "requests", "signed_ok", "cookie_ok", "cookie_issued",
+    "no_cookie_tracked", "cookie_missing", "static_ok", "blocked_hit",
+    "failures", "blocks", "denied_total",
+}
+
+local function persist_stats()
+    if not store then return end
+    local t = {}
+    for _, k in ipairs(PERSIST_KEYS) do
+        t[k] = get_stat(k)
+    end
+    t.day_key = get_stat("day_key")
+    t.day_baseline = get_stat("day_baseline")
+    local f = io.open(STATS_FILE, "w")
+    if f then
+        f:write(cjson.encode(t))
+        f:close()
+    end
+end
+
+local function restore_stats()
+    if not store then return end
+    local f = io.open(STATS_FILE, "r")
+    if not f then return end
+    local content = f:read("*a"); f:close()
+    local ok, t = pcall(cjson.decode, content)
+    if not ok or type(t) ~= "table" then return end
+    for _, k in ipairs(PERSIST_KEYS) do
+        local v = t[k]
+        if type(v) == "number" then store:set(STATS_PREFIX .. k, v, 0) end
+    end
+    local dk = t.day_key
+    if type(dk) == "string" and dk ~= "" then store:set(STATS_PREFIX .. "day_key", dk, 0) end
+    local db = t.day_baseline
+    if type(db) == "number" then store:set(STATS_PREFIX .. "day_baseline", db, 0) end
+end
+
 local function init_shared_stats()
     if not store then return end
-    if not store:add(STATS_PREFIX .. "start_ts", os.time(), 0) then
-        -- 已存在, 不覆盖
-    end
+    local is_new = store:add(STATS_PREFIX .. "start_ts", os.time(), 0)
+    if is_new then restore_stats() end
     store:add(STATS_PREFIX .. "prev_requests", 0, 0)
+    if is_new then
+        -- 全新启动(含重启): 计数器已归零, 当日基线也从 0 开始
+        local dk = get_stat("day_key")
+        if dk == 0 or dk == "" then
+            store:set(STATS_PREFIX .. "day_key", os.date("%Y-%m-%d"), 0)
+            store:set(STATS_PREFIX .. "day_baseline", 0, 0)
+        end
+    else
+        store:add(STATS_PREFIX .. "day_key", "", 0)
+        store:add(STATS_PREFIX .. "day_baseline", 0, 0)
+    end
     for _, k in ipairs({
         "requests", "signed_ok", "cookie_ok", "cookie_issued",
         "no_cookie_tracked", "cookie_missing", "cookie_replay",
@@ -461,6 +511,20 @@ sweep = function()
         local snap_interval = SNAP_LOG_INTERVAL
         local last_snap = get_stat("snap_log_ts")
         if snap_interval <= 0 or (ngx_time() - last_snap) >= snap_interval then
+            -- 当日累计: 跨天或重启(counter 回退)时重置基线
+            local today = os.date("%Y-%m-%d")
+            local day_key = get_stat("day_key")
+            local baseline = get_stat("day_baseline")
+            if day_key ~= today or req_now < baseline then
+                if day_key == today then
+                    baseline = 0
+                else
+                    baseline = req_now
+                end
+                set_stat("day_key", today)
+                set_stat("day_baseline", baseline)
+            end
+            local requests_today = req_now - baseline
             local snap_parts = {}
             local snap_keys = {"requests","signed_ok","cookie_ok","cookie_issued",
                                "static_ok","blocked_hit","cookie_replay","cookie_stale",
@@ -468,9 +532,11 @@ sweep = function()
             for _, k in ipairs(snap_keys) do
                 snap_parts[#snap_parts+1] = k .. "=" .. get_stat(k)
             end
+            snap_parts[#snap_parts+1] = "requests_today=" .. requests_today
             rfw_log("SNAP", table.concat(snap_parts, " "))
             set_stat("snap_log_ts", ngx_time())
         end
+        persist_stats()
     end
 
     prune_block_log()

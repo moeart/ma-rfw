@@ -438,11 +438,21 @@ function loadHistory(days){
       (Array.isArray(d.days)?d.days:[]).forEach(function(dd){
         dates.push(dd.date);
         denied.push(dd.denied_total);
-        var snaps=dd.snapshots||[];
+        var snaps=Array.isArray(dd.snapshots)?dd.snapshots:[];
         var totalReq=0;
-        for(var k=1;k<snaps.length;k++){
-          if(snaps[k].requests&&snaps[k-1].requests){
-            totalReq+=snaps[k].requests-snaps[k-1].requests;
+        if(snaps.length>0){
+          var lastSnap=snaps[snaps.length-1];
+          if(lastSnap.requests_today!=null){
+            totalReq=lastSnap.requests_today;
+          }else{
+            for(var k=0;k<snaps.length;k++){
+              if(snaps[k].requests==null)continue;
+              if(k===0){totalReq+=snaps[k].requests}
+              else{
+                var diff=snaps[k].requests-snaps[k-1].requests;
+                totalReq+=diff>=0?diff:snaps[k].requests;
+              }
+            }
           }
         }
         reqVol.push(totalReq);
