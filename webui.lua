@@ -435,7 +435,7 @@ function loadHistory(days){
     if(!histTrendChart||!histPieChart){initHistCharts()}
     if(histTrendChart){
       var dates=[],denied=[],reqVol=[];
-      d.days.forEach(function(dd){
+      (Array.isArray(d.days)?d.days:[]).forEach(function(dd){
         dates.push(dd.date);
         denied.push(dd.denied_total);
         var snaps=dd.snapshots||[];
@@ -454,7 +454,7 @@ function loadHistory(days){
       histPieChart.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},series:[{type:'pie',radius:['35%','65%'],data:pieData,label:{fontSize:11}}]});
     }
     var ipHtml='<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:6px">IP</th><th style="text-align:right;padding:6px">次数</th></tr>';
-    (d.totals.top_ips||[]).forEach(function(r){ipHtml+='<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px">'+r[0]+'</td><td style="text-align:right;padding:6px">'+r[1]+'</td></tr>'});
+    (Array.isArray(d.totals.top_ips)?d.totals.top_ips:[]).forEach(function(r){ipHtml+='<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px">'+r[0]+'</td><td style="text-align:right;padding:6px">'+r[1]+'</td></tr>'});
     ipHtml+='</table>';
     document.getElementById('hist-top-ips').innerHTML=ipHtml;
   }).catch(function(e){document.getElementById('hist-status').textContent='加载失败: '+e.message});
@@ -707,8 +707,8 @@ function loadConfig(){
     setVal('cfg-block-time',c.block_time);setVal('cfg-block-cache-ttl',c.block_cache_ttl);
     setBool('cfg-debug',c.debug);setVal('cfg-sweep-interval',c.sweep_interval);
     setVal('cfg-snap-log-interval',c.snap_log_interval==null?1800:c.snap_log_interval);
-    wlData=c.admin_whitelist||[];renderWl();
-    tpData=c.admin_trusted_proxies||[];renderTp();
+    wlData=Array.isArray(c.admin_whitelist)?c.admin_whitelist:[];renderWl();
+    tpData=Array.isArray(c.admin_trusted_proxies)?c.admin_trusted_proxies:[];renderTp();
   }).catch(function(e){toast('加载配置失败: '+e.message,false)});
 }
 function saveConfig(){
@@ -793,7 +793,7 @@ function loadFiles(){
   var days=document.getElementById('log-days').value;
   fetch('/cgi-rfw/api/logs?days='+days+'&t='+Date.now()).then(function(r){return r.json()}).then(function(d){
     var el=document.getElementById('file-list');el.innerHTML='';
-    if(!d.files||d.files.length===0){el.innerHTML='<div style="padding:16px;color:var(--text2);font-size:13px">无日志文件</div>';return}
+    if(!Array.isArray(d.files)||d.files.length===0){el.innerHTML='<div style="padding:16px;color:var(--text2);font-size:13px">无日志文件</div>';return}
     d.files.forEach(function(f){
       var row=document.createElement('div');
       row.style.cssText='padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:13px;transition:background .15s';
@@ -811,7 +811,7 @@ function loadFiles(){
 function escHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 var LOG_COLS=[['local_time','时间'],['client_ip','客户端 IP'],['server_name','主机'],['attack_method','事件'],['req_url','URL'],['req_data','数据'],['rule_tag','规则/方法'],['user_agent','UA']];
 function renderLogTable(el,lines){
-  if(!lines||lines.length===0){el.innerHTML='<div style="color:var(--text2);font-size:13px;padding:4px">无日志内容</div>';return}
+  if(!Array.isArray(lines)||lines.length===0){el.innerHTML='<div style="color:var(--text2);font-size:13px;padding:4px">无日志内容</div>';return}
   var h='<table style="border-collapse:collapse;font-size:12px;width:100%;white-space:nowrap">';
   h+='<thead><tr>'+LOG_COLS.map(function(c){return '<th style="text-align:left;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text2);position:sticky;top:0;z-index:1">'+escHtml(c[1])+'</th>'}).join('')+'</tr></thead><tbody>';
   lines.forEach(function(line){
