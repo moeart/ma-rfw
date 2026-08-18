@@ -55,10 +55,6 @@
     "block_time": 600,
     "block_cache_ttl": 60,
 
-    "___status": "状态页",
-    "status_enabled": true,
-    "status_path": "/cgi-rfw/status",
-
     "___sweep": "后台清扫间隔(秒)",
     "sweep_interval": 60,
 
@@ -66,10 +62,5 @@
     "admin_whitelist": ["127.0.0.1", "::1"],
 
     "___debug": "调试模式",
-    "debug": false,
-
-    "___app_fail": "后端失败检测(可选)",
-    "app_fail_enabled": false,
-    "app_fail_statuses": [502, 503, 504],
-    "app_fail_paths": []
+    "debug": false
 }

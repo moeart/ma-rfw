@@ -36,3 +36,4 @@ tools/rfw_test_*
 # lupa binaries (platform-specific)
 tools/lupa/**/*.pyd
 tools/lupa/**/*.dist-info/
+config.json

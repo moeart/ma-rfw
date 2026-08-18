@@ -40,6 +40,7 @@ ngx.req = {
     get_method = function() return "GET" end,
     clear_header = function() end,
     set_header = function() end,
+    get_headers = function() return {} end,
 }
 _ngx_var = {}
 setmetatable(_ngx_var, { __index = function() return nil end })
@@ -62,7 +63,7 @@ package.path = "''' + base + '''/?.lua;" .. package.path
 _phase = "init"
 _mod = require("ma_rfw")
 _mod_ok = (type(_mod) == "table" and type(_mod.run) == "function"
-    and type(_mod.check) == "function" and type(_mod.on_log) == "function")
+    and type(_mod.check) == "function")
 _init_exit = _exit_code   -- require 后应仍为 nil(没在 init 阶段跑请求)
 
 -- 模拟 access.lua 已放行后的 check(): 一律进入 run()(后端不可达→403)
@@ -75,7 +76,8 @@ _exit_code = nil
 _ran_matched = _mod.check()
 _matched_exit = _exit_code
 
--- 状态页 → 独立放行, exit=200
+-- 状态页 → 独立放行, exit=200 (管理白名单含 127.0.0.1, 本机访问)
+_ngx_var["remote_addr"] = "127.0.0.1"
 ngx.ctx = {}
 _ngx_var["http_host"] = "app.example.com"
 _ngx_var["uri"] = "/cgi-rfw/status"
@@ -115,7 +117,7 @@ _ngx_var["rfw_on"] = ""
 
 G = L.globals()
 checks = {
-    ("init 阶段 require 返回完整模块(run/check/on_log)"): bool(G["_mod_ok"]),
+    ("init 阶段 require 返回完整模块(run/check)"): bool(G["_mod_ok"]),
     ("init 阶段 require 不运行请求(exit=nil)"): G["_init_exit"] is None,
     ("匹配站点+动态路径: check() 返回 true"): bool(G["_ran_matched"]),
     ("匹配站点请求被执行(后端不可达→403)"): int(G["_matched_exit"]) == 403,

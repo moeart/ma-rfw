@@ -34,14 +34,6 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
-local status = {
-    render = function()
-        ngx.header["Content-Type"] = "text/plain; charset=utf-8"
-        ngx.say("ma_rfw: status page has moved to /cgi-rfw/status")
-        ngx.exit(ngx.HTTP_OK)
-    end
-}
-
 ngx.log(ngx.ERR, "ma_rfw: module loaded, plugin_dir=" .. plugin_dir)
 
 local ngx_now  = ngx.now
@@ -934,26 +926,6 @@ end
 function _M.check()
     _M.run()
     return true
-end
-
-function _M.on_log()
-    if not config.app_fail_enabled or not store then return end
-    local status = ngx.status
-    local hit = false
-    for _, s in ipairs(config.app_fail_statuses or {}) do
-        if status == s then hit = true; break end
-    end
-    if not hit then return end
-    local uri = ngx.var.uri or ""
-    local paths = config.app_fail_paths or {}
-    if #paths > 0 then
-        local matched = false
-        for _, p in ipairs(paths) do
-            if uri:sub(1, #p) == p then matched = true; break end
-        end
-        if not matched then return end
-    end
-    record_failure(ngx.var.remote_addr or "", "app-fail")
 end
 
 _M.stats = stats

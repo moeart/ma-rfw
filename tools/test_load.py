@@ -33,6 +33,7 @@ ngx.req = {
     get_method = function() return "GET" end,
     clear_header = function() end,
     set_header = function() end,
+    get_headers = function() return {} end,
 }
 _ngx_var = {}
 setmetatable(_ngx_var, { __index = function() return "" end })
@@ -57,7 +58,8 @@ dofile("''' + base + '''/ma_rfw.lua")
 core = _G.ma_rfw_core
 _core_loaded = (type(core) == "table" and type(core.run) == "function")
 
--- 状态页路由: uri=/cgi-rfw/status
+-- 状态页路由: uri=/cgi-rfw/status (管理白名单含 127.0.0.1, 本机访问)
+_ngx_var["remote_addr"] = "127.0.0.1"
 _ngx_var["uri"] = "/cgi-rfw/status"
 _says = {}
 _exit_code = nil
@@ -101,7 +103,7 @@ leaks = [k for k in G.keys() if k not in allowed]
 checks = {
     ("模块加载成功"): bool(G["_core_loaded"]),
     ("状态页路由 exit=200"): int(G["_status_exit"]) == 200,
-    ("状态页含标题"): ("MA-RFW Status" in G["_status_html"]),
+    ("状态页含标题"): bool("MA-RFW" in G["_status_html"] and "状态" in G["_status_html"]),
     ("后端不可达 deny=403"): int(G["_deny_exit"]) == 403,
     ("deny 页面附 debug 面板(debug=true)"): ("rfw-debug" in G["_deny_html"]),
     ("debug 面板样式内嵌 HTML(<style>)"): ("#rfw-debug" in G["_deny_html"]),

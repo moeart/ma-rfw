@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lup
 from lupa.luajit21 import LuaRuntime
 
 base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-files = sys.argv[1:] or ["ma_rfw.lua", "config.lua", "sha256.lua", "status.lua"]
+files = sys.argv[1:] or ["ma_rfw.lua", "webui.lua", "sha256.lua", "access.lua.example", "init.lua.example"]
 L = LuaRuntime()
 ok = True
 for f in files:

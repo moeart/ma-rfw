@@ -96,7 +96,7 @@ GET/HEAD 且未带 `RFWDATA` 签名头、且扩展名在静态表 → 静态, �
 - **封禁 IP**: 本 worker 签发的封禁(IP、封禁时间、解封时间、剩余时长、原因:
   `fail-max` / `cookie-missing-quota` / 触发封禁的最后一个拒绝原因)。
 
-`config.status_enabled = false` 可关闭。建议只在内网/本机访问。
+状态页始终开启, 建议只在内网/本机访问(管理面板受 `admin_whitelist` 限制)。
 
 ## 性能优化
 
@@ -132,7 +132,6 @@ GET/HEAD 且未带 `RFWDATA` 签名头、且扩展名在静态表 → 静态, �
 | `fail_max` / `fail_window` / `block_time` | 5 / 60 / 600 | 惩罚参数 |
 | `block_cache_ttl` | 60 | 封禁状态内存缓存 TTL(秒) |
 | `sweep_interval` | 60 | 清扫/统计窗口(秒) |
-| `status_enabled` / `status_path` | true / `/cgi-rfw/status` | 状态页开关与路径 |
 
 ## 运维提醒
 
@@ -185,7 +184,6 @@ python tools/test_load.py             # 模块加载/状态页路由/作用域�
 python tools/test_global.py           # init.lua require + access.lua check() + $rfw_on 标记门
 python tools/test_real_request.py     # 签名/重放链路
 python tools/test_static.py           # 静态/动态分类
-python tools/test_status.py           # 状态页渲染冒烟
 python tools/test_cookie_missing.py   # 无 cookie 日配额: 超限封禁
 python tools/test_cookie_replay.py    # _RFW 运动 Token: ts 新鲜度/同值次数/seq 单调
 python tools/test_cookie_nobootstrap.py # 纯 JS 源(bootstrap=false): 零下发 + 配额兜底

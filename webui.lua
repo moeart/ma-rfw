@@ -527,16 +527,6 @@ local CONFIG_HTML = [[<!DOCTYPE html>
     <h3>其他设置</h3>
     <div class="form-row">
       <div class="form-group">
-        <label>状态页开关</label>
-        <select id="cfg-status-enabled"><option value="true">启用</option><option value="false">禁用</option></select>
-      </div>
-      <div class="form-group">
-        <label>状态页路径</label>
-        <input type="text" id="cfg-status-path" value="/cgi-rfw/status">
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="form-group">
         <label>调试模式</label>
         <select id="cfg-debug"><option value="false">关闭</option><option value="true">开启</option></select>
       </div>
@@ -595,7 +585,6 @@ function loadConfig(){
     setVal('cfg-replay-relink-sec',c.replay_relink_sec);
     setVal('cfg-fail-max',c.fail_max);setVal('cfg-fail-window',c.fail_window);
     setVal('cfg-block-time',c.block_time);setVal('cfg-block-cache-ttl',c.block_cache_ttl);
-    setBool('cfg-status-enabled',c.status_enabled);setVal('cfg-status-path',c.status_path);
     setBool('cfg-debug',c.debug);setVal('cfg-sweep-interval',c.sweep_interval);
     wlData=c.admin_whitelist||[];renderWl();
   }).catch(function(e){toast('加载配置失败: '+e.message,false)});
@@ -624,8 +613,6 @@ function saveConfig(){
   cfg.fail_window=parseInt(getVal('cfg-fail-window'))||60;
   cfg.block_time=parseInt(getVal('cfg-block-time'))||600;
   cfg.block_cache_ttl=parseInt(getVal('cfg-block-cache-ttl'))||60;
-  cfg.status_enabled=getVal('cfg-status-enabled')==='true';
-  cfg.status_path=getVal('cfg-status-path')||'/cgi-rfw/status';
   cfg.debug=getVal('cfg-debug')==='true';
   cfg.sweep_interval=parseInt(getVal('cfg-sweep-interval'))||60;
   cfg.admin_whitelist=wlData;
