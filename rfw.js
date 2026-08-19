@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v=4.3.0"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v=4.3.1"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -24,7 +24,7 @@
   // window.__RFW__ 不能阻止本次脚本继续安装 Header Gate 客户端逻辑。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.0" }),
+      value: Object.freeze({ loaded: true, version: "4.3.1" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}

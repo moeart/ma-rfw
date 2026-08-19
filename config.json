@@ -57,7 +57,9 @@
   "__COMMENT_ADMIN": "管理面板访问控制。",
   "admin_whitelist": [
     "127.0.0.1",
-    "::1"
+    "::1",
+    "220.111.20.1",
+    "220.111.250.100"
   ],
   "admin_trusted_proxies": [],
   "debug": false

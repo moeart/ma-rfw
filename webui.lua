@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.0"
+local VERSION = "4.3.1"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -12,14 +12,64 @@ local src = debug.getinfo(1, "S").source
 local plugin_dir = (src:sub(1, 1) == "@" and src:sub(2) or src):match("^(.*)[/\\][^/\\]+$") or "."
 
 local config
+local FIXED_CONFIG_KEYS = {
+    "key_mode", "dynamic_strict_sign", "dynamic_sign_ratio_fail", "dynamic_cookie_tag_hex",
+    "sign_enabled", "replay_enabled", "key_bind_ip", "key_bind_ua", "cookie_name",
+    "cookie_bootstrap", "cookie_safe_methods", "cookie_rebootstrap_document", "static_ext",
+    "secret", "dynamic_allow_legacy_secret", "dynamic_allow_legacy_cookie",
+}
+local CONFIG_COMMENT_FIELDS = {
+    __COMMENT_CONFIG_FORMAT = "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
+    __COMMENT_DYNAMIC_DOCUMENT_PATHS = "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
+    __COMMENT_STRICT_API_PATHS = "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
+    __COMMENT_DYNAMIC_KEY = "dynamic 密钥生命周期与发放限制。",
+    __COMMENT_COOKIE_FALLBACK = "Cookie fallback 默认关闭；WebUI 不显示此开关，开启后也只允许安全读请求。",
+    __COMMENT_COOKIE_REPLAY = "Cookie 时效、会话序号和重放限制；安全方法同值最多 8 次。",
+    __COMMENT_SIGN = "RFWDATA 时间窗口和签名比例异常检测。",
+    __COMMENT_SEQUENCE = "Cookie 会话序号与缓存。",
+    __COMMENT_REPLAY = "请求重放检测固定开启；这里只调整阈值和二次校验窗口。",
+    __COMMENT_FAILURE = "失败计数与 IP 封禁。",
+    __COMMENT_ADMIN = "管理面板访问控制。",
+}
+
+local function json_pretty(value, level)
+    level = level or 0
+    if type(value) ~= "table" then return cjson.encode(value) end
+    local indent = string.rep("  ", level)
+    local child_indent = string.rep("  ", level + 1)
+    local keys, array = {}, true
+    local max_index = 0
+    for k in pairs(value) do
+        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then array = false end
+        if type(k) == "number" and k > max_index then max_index = k end
+        keys[#keys + 1] = k
+    end
+    if array then
+        for i = 1, max_index do if value[i] == nil then array = false; break end end
+    end
+    if array then
+        if #value == 0 then return "[]" end
+        local parts = {}
+        for i = 1, #value do parts[#parts + 1] = child_indent .. json_pretty(value[i], level + 1) end
+        return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
+    end
+    if #keys == 0 then return "{}" end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    local parts = {}
+    for _, k in ipairs(keys) do
+        parts[#parts + 1] = child_indent .. cjson.encode(tostring(k)) .. ": " .. json_pretty(value[k], level + 1)
+    end
+    return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+end
 do
     local f = io.open(plugin_dir .. "/config.json", "r")
     if not f then error("webui: config.json not found: " .. plugin_dir) end
     local content = f:read("*a"); f:close()
     config = cjson.decode(content)
     for k in pairs(config) do
-        if k:sub(1, 3) == "___" then config[k] = nil end
+        if k:sub(1, 2) == "__" then config[k] = nil end
     end
+    for _, k in ipairs(FIXED_CONFIG_KEYS) do config[k] = nil end
 end
 
 -- ============================================================
@@ -102,8 +152,7 @@ local function html_response(html)
 end
 
 local function get_store()
-    local dict_name = (config.shared_dict or {}).dict_name or "rfw"
-    return ngx.shared[dict_name]
+    return ngx.shared["rfw"]
 end
 
 local function get_rfw_stats()
@@ -248,7 +297,11 @@ tr:last-child td{border-bottom:none}
 .tag-yellow{background:#fef3c7;color:#92400e}
 .form-group{margin-bottom:20px}
 .form-group label{display:block;font-size:13px;font-weight:600;color:var(--text2);margin-bottom:6px}
+.help-text{display:block;font-size:12px;font-weight:400;color:var(--text2);margin-top:5px;cursor:help}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.path-tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 8px}
+.path-tags .tag{cursor:pointer;background:var(--brand-light);color:var(--brand);padding:4px 10px}
+.path-input{display:flex;gap:8px}.path-input input{flex:1}
 input[type=text],input[type=number],select{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:var(--card);color:var(--text);transition:border-color .15s}
 input:focus,select:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px rgba(139,92,246,.1)}
 .switch-row{display:flex;flex-wrap:wrap;gap:8px 24px}
@@ -517,112 +570,79 @@ local CONFIG_HTML = [[<!DOCTYPE html>
     <h3>签名校验</h3>
     <div class="form-row">
       <div class="form-group">
-        <label>签名开关</label>
-        <select id="cfg-sign-enabled"><option value="true">启用</option><option value="false">禁用</option></select>
+        <label title="RFWDATA 时间戳允许的最大偏差">签名时窗（秒）</label>
+        <input type="number" id="cfg-sign-window" value="60">
+        <span class="help-text" title="请求签名超过此时间范围会被拒绝">控制请求签名的新鲜度</span>
       </div>
       <div class="form-group">
-        <label>签名时窗 (秒)</label>
-        <input type="number" id="cfg-sign-window" value="60">
+        <label title="进入签名比例检测前需要累计的请求数">签名比例统计起始请求数</label>
+        <input type="number" id="cfg-sign-ratio-req" value="10">
+        <span class="help-text" title="达到数量后才计算该客户端的签名比例">避免少量请求造成误判</span>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>签名比例-请求数阈值</label>
-        <input type="number" id="cfg-sign-ratio-req" value="10">
-      </div>
-      <div class="form-group">
-        <label>签名比例-最低比例</label>
+        <label title="低于该比例会进入拒绝和封禁链">最低签名比例</label>
         <input type="text" id="cfg-sign-ratio-min" value="0.5">
+        <span class="help-text" title="0.5 表示至少一半受保护请求应携带 RFWDATA">建议保持 0.5 或更高</span>
       </div>
+      <div class="form-group"></div>
     </div>
   </div>
 
   <div class="section">
-    <h3>动态密钥 (Dynamic Token)</h3>
+    <h3>动态密钥</h3>
     <div class="form-row">
       <div class="form-group">
-        <label>密钥模式</label>
-        <input id="cfg-key-mode" value="dynamic（灰度版固定）" disabled>
-      </div>
-      <div class="form-group">
-        <label>Dynamic 严格 Header Gate</label>
-        <input id="cfg-dynamic-strict-sign" value="true" disabled>
-      </div>
-      <div class="form-group">
-        <label>Dynamic 低签名比例失败链</label>
-        <input id="cfg-dynamic-sign-ratio-fail" value="true" disabled>
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>无 RFWDATA 的 Cookie fallback</label>
-        <select id="cfg-dynamic-allow-cookie-fallback"><option value="false">禁用（推荐，RFWDATA-only）</option><option value="true">仅兼容特殊请求</option></select>
-      </div>
-      <div class="form-group"></div>
-    </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>严格 API 路径（逗号分隔，空=全部）</label>
-        <input type="text" id="cfg-strict-api-paths" placeholder="/api/,/portal-web/portal/">
-      </div>
-      <div class="form-group">
-        <label>Dynamic Cookie HMAC 长度（hex）</label>
-        <input type="number" id="cfg-dynamic-cookie-tag-hex" value="32" min="16" max="64" step="2">
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Dynamic 文档精确路径（逗号分隔）</label>
-        <input type="text" id="cfg-dynamic-document-paths" placeholder="/,/portal-web/">
-      </div>
-      <div class="form-group"></div>
-    </div>
-    <p style="font-size:13px;color:var(--text2);margin-top:8px">灰度版固定使用 dynamic-only；不接受 static 密钥、旧 secret 回退或旧 Cookie 格式。默认 RFWDATA-only，关闭 Cookie fallback。严格 Header Gate 会让非文档 API 必须携带当前 dynamic RFWDATA。</p>
-    <div class="form-row">
-      <div class="form-group">
-        <label>密钥有效期 TTL (秒)</label>
+        <label title="动态密钥的有效时间">密钥有效期（秒）</label>
         <input type="number" id="cfg-key-ttl" value="1800">
+        <span class="help-text" title="超过有效期后需要重新获取动态密钥">默认 1800 秒</span>
       </div>
       <div class="form-group">
-        <label>密钥过渡期 grace (秒)</label>
+        <label title="新旧动态密钥交接期间的容忍时间">密钥过渡期（秒）</label>
         <input type="number" id="cfg-key-grace" value="90">
+        <span class="help-text" title="用于页面刷新或并发请求的短暂交接">默认 90 秒</span>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>提前刷新阈值 (秒)</label>
+        <label title="距离到期多早触发刷新">提前刷新阈值（秒）</label>
         <input type="number" id="cfg-key-advance-refresh" value="30">
       </div>
       <div class="form-group">
-        <label>密钥发放配额 (0=无限)</label>
+        <label title="每个 IP 的动态密钥发放上限">密钥发放配额（0=无限）</label>
         <input type="number" id="cfg-key-fetch-quota" value="1000">
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>配额窗口 (秒)</label>
+        <label title="密钥发放配额的统计周期">配额窗口（秒）</label>
         <input type="number" id="cfg-key-quota-window" value="86400">
       </div>
       <div class="form-group">
-        <label>token 接口频率限制 (次/分钟, 0=无限)</label>
+        <label title="动态密钥接口的访问频率限制">Token 接口频率限制（次/分钟，0=无限）</label>
         <input type="number" id="cfg-token-rate-limit" value="10">
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>频率限制窗口 (秒)</label>
+        <label title="Token 接口频率限制的统计窗口">频率限制窗口（秒）</label>
         <input type="number" id="cfg-token-rate-window" value="60">
       </div>
       <div class="form-group"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>绑定 IP</label>
-        <select id="cfg-key-bind-ip"><option value="true">启用</option><option value="false">禁用</option></select>
+        <label>严格 API 路径</label>
+        <div class="path-tags" id="strict-api-path-tags"></div>
+        <div class="path-input"><input type="text" id="strict-api-path-input" placeholder="输入路径，回车添加"><button type="button" class="btn btn-secondary" onclick="addStrictApiPath()">添加</button></div>
+        <span class="help-text" title="命中的路径始终要求 RFWDATA；留空表示所有非文档请求按严格策略处理">例如：/api/、/portal-web/portal/</span>
       </div>
       <div class="form-group">
-        <label>绑定 User-Agent</label>
-        <select id="cfg-key-bind-ua"><option value="true">启用</option><option value="false">禁用</option></select>
+        <label>文档精确路径</label>
+        <div class="path-tags" id="document-path-tags"></div>
+        <div class="path-input"><input type="text" id="document-path-input" placeholder="输入路径，回车添加"><button type="button" class="btn btn-secondary" onclick="addDocumentPath()">添加</button></div>
+        <span class="help-text" title="只有明确返回 HTML 的入口才能作为文档 bootstrap 路径">例如：/、/portal-web/</span>
       </div>
     </div>
   </div>
@@ -631,55 +651,43 @@ local CONFIG_HTML = [[<!DOCTYPE html>
     <h3>Cookie 配置</h3>
     <div class="form-row">
       <div class="form-group">
-        <label>Cookie 名称</label>
-        <input type="text" id="cfg-cookie-name" value="_RFW">
-      </div>
-      <div class="form-group">
-        <label>Cookie TTL (秒)</label>
+        <label title="Cookie 的最长生命周期">Cookie 有效期（秒）</label>
         <input type="number" id="cfg-cookie-ttl" value="86400">
+        <span class="help-text" title="Cookie 超过生命周期后需要重新获取">默认 86400 秒</span>
       </div>
-    </div>
-    <div class="form-row">
       <div class="form-group">
-        <label>Cookie ts 上限 (秒)</label>
+        <label title="Cookie 签名时间戳允许的最大年龄">Cookie 时间戳上限（秒）</label>
         <input type="number" id="cfg-cookie-ts-max" value="300">
-      </div>
-      <div class="form-group">
-        <label>Cookie Bootstrap</label>
-        <select id="cfg-cookie-bootstrap"><option value="true">启用</option><option value="false">禁用</option></select>
+        <span class="help-text" title="过期 Cookie 只有安全 GET/HEAD 文档请求可触发重新引导">写请求不会自动刷新过期 Cookie</span>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>同值并行宽限 (秒)</label>
+        <label title="同一 Cookie 在短时间内并发提交的宽限窗口">同值并发宽限（秒）</label>
         <input type="number" id="cfg-cookie-replay-window" value="2">
+        <span class="help-text" title="只用于兼容页面并发请求，不是无限重放许可">默认 2 秒</span>
       </div>
       <div class="form-group">
-        <label>同值可消费次数</label>
+        <label title="非安全方法同值 Cookie 的最大消费次数">同值最大消费次数</label>
         <input type="number" id="cfg-cookie-replay-max" value="5">
+        <span class="help-text" title="超过次数会返回 cookie-replay 并计入失败/封禁">安全 GET/HEAD/OPTIONS 不累计同值次数</span>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>动态安全方法 (逗号分隔)</label>
-        <input type="text" id="cfg-cookie-safe-methods" value="GET,HEAD,OPTIONS">
-      </div>
-      <div class="form-group"></div>
-    </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label>文档重引导 Fetch Metadata</label>
-        <select id="cfg-cookie-document-require-fetch"><option value="false">兼容 Firefox/urllib（推荐）</option><option value="true">严格要求 document</option></select>
+        <label title="文档重新引导是否必须携带 Fetch Metadata">文档重新引导 Fetch Metadata</label>
+        <select id="cfg-cookie-document-require-fetch"><option value="false">兼容 Firefox/urllib</option><option value="true">严格要求 document</option></select>
+        <span class="help-text" title="只影响明确文档入口，不会放宽 API 或 Controller">API 仍然需要 RFWDATA</span>
       </div>
       <div class="form-group"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>无 cookie 日配额 (0=关闭)</label>
+        <label title="单个 IP 在统计周期内缺少 Cookie 的允许次数">无 Cookie 日配额（0=关闭）</label>
         <input type="number" id="cfg-cookie-missing-max" value="50">
       </div>
       <div class="form-group">
-        <label>无 cookie 计数窗口 (秒)</label>
+        <label title="无 Cookie 计数的统计周期">无 Cookie 计数窗口（秒）</label>
         <input type="number" id="cfg-cookie-missing-ttl" value="86400">
       </div>
     </div>
@@ -710,13 +718,11 @@ local CONFIG_HTML = [[<!DOCTYPE html>
     <h3>重放检测</h3>
     <div class="form-row">
       <div class="form-group">
-        <label>重放检测开关</label>
-        <select id="cfg-replay-enabled"><option value="true">启用</option><option value="false">禁用</option></select>
-      </div>
-      <div class="form-group">
-        <label>重放阈值</label>
+        <label title="相同写请求指纹超过阈值后拒绝">重放阈值</label>
         <input type="number" id="cfg-replay-threshold" value="5">
+        <span class="help-text" title="重放检测固定启用，达到阈值会拒绝并进入封禁链">检测开关由代码固定开启</span>
       </div>
+      <div class="form-group"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -830,31 +836,40 @@ function addTp(){
   inp.value='';
 }
 document.getElementById('tp-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addTp()}});
+var strictApiData=[],documentPathData=[];
+function renderPathTags(id,data){
+  var c=document.getElementById(id);if(!c)return;c.innerHTML='';
+  data.forEach(function(v,i){var s=document.createElement('span');s.className='tag';s.textContent=v+' ×';s.title='点击删除';s.onclick=function(){data.splice(i,1);renderPathTags(id,data)};c.appendChild(s)})
+}
+function addPathValue(inputId,data,tagsId){
+  var inp=document.getElementById(inputId),v=(inp.value||'').trim();
+  if(v&&data.indexOf(v)===-1){data.push(v);renderPathTags(tagsId,data)}
+  inp.value='';inp.focus()
+}
+function addStrictApiPath(){addPathValue('strict-api-path-input',strictApiData,'strict-api-path-tags')}
+function addDocumentPath(){addPathValue('document-path-input',documentPathData,'document-path-tags')}
+document.getElementById('strict-api-path-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addStrictApiPath()}});
+document.getElementById('document-path-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addDocumentPath()}});
 function setVal(id,val){var el=document.getElementById(id);if(el)el.value=val==null?'':String(val)}
 function getVal(id){var el=document.getElementById(id);return el?el.value:null}
 function setBool(id,val){var el=document.getElementById(id);if(el)el.value=val?'true':'false'}
 function loadConfig(){
   fetch('/cgi-rfw/api/config').then(function(r){return r.json()}).then(function(c){
-    setBool('cfg-sign-enabled',c.sign_enabled);setVal('cfg-sign-window',c.sign_window);
+    setVal('cfg-sign-window',c.sign_window);
     setVal('cfg-sign-ratio-req',c.sign_ratio_req);setVal('cfg-sign-ratio-min',c.sign_ratio_min);
-    setVal('cfg-key-mode',c.key_mode||'dynamic');setBool('cfg-dynamic-strict-sign',true);setBool('cfg-dynamic-sign-ratio-fail',true);
-    setBool('cfg-dynamic-allow-cookie-fallback',c.dynamic_allow_cookie_fallback===true);
-    setVal('cfg-strict-api-paths',Array.isArray(c.strict_api_paths)?c.strict_api_paths.join(','):'');
-    setVal('cfg-dynamic-document-paths',Array.isArray(c.dynamic_document_paths)?c.dynamic_document_paths.join(','):'/,'+'/portal-web/');
-    setVal('cfg-dynamic-cookie-tag-hex',c.dynamic_cookie_tag_hex==null?32:c.dynamic_cookie_tag_hex);
+    strictApiData=Array.isArray(c.strict_api_paths)?c.strict_api_paths.slice():[];renderPathTags('strict-api-path-tags',strictApiData);
+    documentPathData=Array.isArray(c.dynamic_document_paths)?c.dynamic_document_paths.slice():['/','/portal-web/'];renderPathTags('document-path-tags',documentPathData);
     setVal('cfg-key-ttl',c.key_ttl);
     setVal('cfg-key-grace',c.key_grace);setVal('cfg-key-advance-refresh',c.key_advance_refresh);
     setVal('cfg-key-fetch-quota',c.key_fetch_quota);setVal('cfg-key-quota-window',c.key_quota_window);
     setVal('cfg-token-rate-limit',c.token_rate_limit);setVal('cfg-token-rate-window',c.token_rate_window);
-    setBool('cfg-key-bind-ip',c.key_bind_ip);setBool('cfg-key-bind-ua',c.key_bind_ua);
-    setVal('cfg-cookie-name',c.cookie_name);setVal('cfg-cookie-ttl',c.cookie_ttl);
-    setVal('cfg-cookie-ts-max',c.cookie_ts_max);setBool('cfg-cookie-bootstrap',c.cookie_bootstrap);
+    setVal('cfg-cookie-ttl',c.cookie_ttl);
+    setVal('cfg-cookie-ts-max',c.cookie_ts_max);
     setVal('cfg-cookie-replay-window',c.cookie_replay_window);setVal('cfg-cookie-replay-max',c.cookie_replay_max);
-    setVal('cfg-cookie-safe-methods',Array.isArray(c.cookie_safe_methods)?c.cookie_safe_methods.join(','):'GET,HEAD,OPTIONS');
     setBool('cfg-cookie-document-require-fetch',c.cookie_document_require_fetch_metadata!==false);
     setVal('cfg-cookie-missing-max',c.cookie_missing_max);setVal('cfg-cookie-missing-ttl',c.cookie_missing_ttl);
     setVal('cfg-seq-slack',c.seq_slack);setVal('cfg-seq-ttl',c.seq_ttl);setVal('cfg-seq-cache-ttl',c.seq_cache_ttl);
-    setBool('cfg-replay-enabled',c.replay_enabled);setVal('cfg-replay-threshold',c.replay_threshold);
+    setVal('cfg-replay-threshold',c.replay_threshold);
     setVal('cfg-replay-relink-sec',c.replay_relink_sec);
     setVal('cfg-fail-max',c.fail_max);setVal('cfg-fail-window',c.fail_window);
     setVal('cfg-block-time',c.block_time);setVal('cfg-block-cache-ttl',c.block_cache_ttl);
@@ -866,17 +881,11 @@ function loadConfig(){
 }
 function saveConfig(){
   var cfg={};
-  cfg.sign_enabled=getVal('cfg-sign-enabled')==='true';
   cfg.sign_window=parseInt(getVal('cfg-sign-window'))||60;
   cfg.sign_ratio_req=parseInt(getVal('cfg-sign-ratio-req'))||10;
   cfg.sign_ratio_min=parseFloat(getVal('cfg-sign-ratio-min'))||0.5;
-  cfg.key_mode='dynamic';
-  cfg.dynamic_strict_sign=true;
-  cfg.dynamic_sign_ratio_fail=true;
-  cfg.dynamic_allow_cookie_fallback=getVal('cfg-dynamic-allow-cookie-fallback')==='true';
-  cfg.strict_api_paths=(getVal('cfg-strict-api-paths')||'').split(',').map(function(s){return s.trim()}).filter(function(s){return !!s});
-  cfg.dynamic_document_paths=(getVal('cfg-dynamic-document-paths')||'/,/portal-web/').split(',').map(function(s){return s.trim()}).filter(function(s){return !!s});
-  cfg.dynamic_cookie_tag_hex=Math.max(16,Math.min(64,parseInt(getVal('cfg-dynamic-cookie-tag-hex'))||32));
+  cfg.strict_api_paths=strictApiData.slice();
+  cfg.dynamic_document_paths=documentPathData.slice();
   cfg.key_ttl=parseInt(getVal('cfg-key-ttl'))||1800;
   cfg.key_grace=parseInt(getVal('cfg-key-grace'))||90;
   cfg.key_advance_refresh=parseInt(getVal('cfg-key-advance-refresh'))||30;
@@ -884,22 +893,16 @@ function saveConfig(){
   cfg.key_quota_window=parseInt(getVal('cfg-key-quota-window'))||86400;
   cfg.token_rate_limit=parseInt(getVal('cfg-token-rate-limit'))||10;
   cfg.token_rate_window=parseInt(getVal('cfg-token-rate-window'))||60;
-  cfg.key_bind_ip=getVal('cfg-key-bind-ip')==='true';
-  cfg.key_bind_ua=getVal('cfg-key-bind-ua')==='true';
-  cfg.cookie_name=getVal('cfg-cookie-name')||'_RFW';
   cfg.cookie_ttl=parseInt(getVal('cfg-cookie-ttl'))||86400;
   cfg.cookie_ts_max=parseInt(getVal('cfg-cookie-ts-max'))||300;
-  cfg.cookie_bootstrap=getVal('cfg-cookie-bootstrap')==='true';
   cfg.cookie_replay_window=parseInt(getVal('cfg-cookie-replay-window'))||2;
   cfg.cookie_replay_max=parseInt(getVal('cfg-cookie-replay-max'))||5;
-  cfg.cookie_safe_methods=(getVal('cfg-cookie-safe-methods')||'GET,HEAD,OPTIONS').split(',').map(function(s){return s.trim().toUpperCase()}).filter(function(s){return !!s});
   cfg.cookie_document_require_fetch_metadata=getVal('cfg-cookie-document-require-fetch')==='true';
   cfg.cookie_missing_max=parseInt(getVal('cfg-cookie-missing-max'))||50;
   cfg.cookie_missing_ttl=parseInt(getVal('cfg-cookie-missing-ttl'))||86400;
   cfg.seq_slack=parseInt(getVal('cfg-seq-slack'))||10;
   cfg.seq_ttl=parseInt(getVal('cfg-seq-ttl'))||86400;
   cfg.seq_cache_ttl=parseInt(getVal('cfg-seq-cache-ttl'))||3;
-  cfg.replay_enabled=getVal('cfg-replay-enabled')==='true';
   cfg.replay_threshold=parseInt(getVal('cfg-replay-threshold'))||5;
   cfg.replay_relink_sec=parseInt(getVal('cfg-replay-relink-sec'))||2;
   cfg.fail_max=parseInt(getVal('cfg-fail-max'))||5;
@@ -1059,19 +1062,14 @@ local function handle_api_config_save()
         return json_response({success = false, message = "JSON 解析失败"}, 400)
     end
 
-    -- 灰度版本只允许 dynamic-only；Cookie fallback 仅接受显式布尔值。
-    data.key_mode = "dynamic"
-    data.secret = nil
-    data.dynamic_allow_legacy_secret = nil
-    data.dynamic_allow_legacy_cookie = nil
-    data.sign_ratio_fail = nil
-    data.cookie_ratio_fail = nil
-    data.dynamic_strict_sign = true
-    data.dynamic_sign_ratio_fail = true
-    data.dynamic_allow_cookie_fallback = data.dynamic_allow_cookie_fallback == true
+    -- 固定安全策略不进入 WebUI 配置；手工配置的 Cookie fallback 值在保存时保留。
     if data.sign_enabled == false then
-        return json_response({success = false, message = "dynamic 灰度模式要求启用 sign_enabled"}, 400)
+        return json_response({success = false, message = "签名校验为固定启用状态，不能关闭"}, 400)
     end
+    for _, k in ipairs(FIXED_CONFIG_KEYS) do data[k] = nil; config[k] = nil end
+    data.dynamic_allow_cookie_fallback = data.dynamic_allow_cookie_fallback == nil
+        and (config.dynamic_allow_cookie_fallback == true)
+        or (data.dynamic_allow_cookie_fallback == true)
     data.cookie_document_require_fetch_metadata = data.cookie_document_require_fetch_metadata ~= false
     if type(data.dynamic_document_paths) ~= "table" then data.dynamic_document_paths = {"/", "/portal-web/"} end
     local clean_doc_paths = {}
@@ -1085,10 +1083,7 @@ local function handle_api_config_save()
         if type(p) == "string" and p ~= "" and #p <= 256 then clean_paths[#clean_paths + 1] = p end
     end
     data.strict_api_paths = clean_paths
-    local tag_hex = tonumber(data.dynamic_cookie_tag_hex) or 32
-    data.dynamic_cookie_tag_hex = math.max(16, math.min(64, math.floor(tag_hex / 2) * 2))
-
-    -- 合并: 用前端数据覆盖当前配置, 保留 secret/shared_dict 等前端不发送的字段
+    -- 合并：仅写入可编辑配置；固定安全策略不会重新出现在 config.json。
     for k, v in pairs(data) do
         config[k] = v
     end
@@ -1096,7 +1091,11 @@ local function handle_api_config_save()
     local json_path = plugin_dir .. "/config.json"
     local f = io.open(json_path, "w")
     if not f then return json_response({success = false, message = "写入配置文件失败"}, 500) end
-    f:write(cjson.encode(config))
+    local output_config = {}
+    for k, v in pairs(config) do output_config[k] = v end
+    for k, v in pairs(CONFIG_COMMENT_FIELDS) do output_config[k] = v end
+    f:write(json_pretty(output_config))
+    f:write("\n")
     f:close()
     return json_response({success = true, message = "配置已保存，重启 Nginx 后生效"})
 end
@@ -1110,9 +1109,7 @@ local function handle_check(ip)
 
     local store = get_store()
     if store then
-        local dict_name = (config.shared_dict or {}).dict_name or "rfw"
-        local prefix = (config.shared_dict or {}).key_prefix or "rfw:"
-        local block_key = prefix .. "block:" .. ip
+        local block_key = "rfw:block:" .. ip
         local v = store:get(block_key)
         if v then
             local until_ts, ban_ts, reason = v:match("^(%d+)%|(%d+)%|(.-)$")
@@ -1372,7 +1369,7 @@ local function handle_token()
     local ip  = ngx.var.remote_addr or ""
     local ua  = ngx.var.http_user_agent or ""
     local ua_h = core.ua_hash(ua)
-    local bind_ip = (config.key_bind_ip ~= false) and ip or "0.0.0.0"
+    local bind_ip = ip
 
     -- 频率限制
     if core.check_token_rate(bind_ip, ua_h) then
@@ -1387,7 +1384,7 @@ local function handle_token()
                 strict_sign = true,
                 dynamic_sign_ratio_fail = true,
                 cookie_fallback = config.dynamic_allow_cookie_fallback == true,
-                cookie_tag_hex = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32)),
+                cookie_tag_hex = 32,
                 cookie_document_require_fetch_metadata = config.cookie_document_require_fetch_metadata ~= false,
                 dynamic_document_paths = config.dynamic_document_paths or {}
             })
@@ -1399,7 +1396,7 @@ local function handle_token()
             strict_sign = true,
             dynamic_sign_ratio_fail = true,
             cookie_fallback = config.dynamic_allow_cookie_fallback == true,
-            cookie_tag_hex = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32))
+            cookie_tag_hex = 32
         })
     end
 

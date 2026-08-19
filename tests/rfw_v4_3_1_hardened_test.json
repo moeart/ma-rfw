@@ -1,6 +1,6 @@
 {
-  "total": 47,
-  "passed": 47,
+  "total": 49,
+  "passed": 49,
   "failed": 0,
   "skipped": 0,
   "checks": [
@@ -102,6 +102,14 @@
     },
     {
       "suite": "dynamic",
+      "name": "Cookie fallback rejects write method",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "headerless fallback is read-only"
+    },
+    {
+      "suite": "dynamic",
       "name": "Cookie fallback low sign ratio rejected",
       "observed": "403",
       "expected": "403",
@@ -182,11 +190,11 @@
     },
     {
       "suite": "dynamic",
-      "name": "strict mode with sign disabled",
-      "observed": "403",
-      "expected": "403",
+      "name": "fixed signing cannot be disabled",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
       "status": "PASS",
-      "detail": "explicit configuration error; no Cookie fallback"
+      "detail": "runtime rejects sign_enabled override"
     },
     {
       "suite": "dynamic",
@@ -246,6 +254,14 @@
     },
     {
       "suite": "cookie",
+      "name": "safe GET ninth reuse rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "fixed safe-method replay limit is 8"
+    },
+    {
+      "suite": "cookie",
       "name": "strict POST sixth reuse",
       "observed": "403",
       "expected": "403",
@@ -286,7 +302,7 @@
     },
     {
       "suite": "webui",
-      "name": "version is v4.3.0",
+      "name": "version is v4.3.1",
       "observed": "ALLOW",
       "expected": "ALLOW",
       "status": "PASS",
@@ -310,19 +326,19 @@
     },
     {
       "suite": "webui",
-      "name": "config page exposes v4 policy fields",
+      "name": "config page uses Chinese editable fields",
       "observed": "ALLOW",
       "expected": "ALLOW",
       "status": "PASS",
-      "detail": "fields=['cfg-key-mode', 'cfg-dynamic-strict-sign', 'cfg-dynamic-sign-ratio-fail', 'cfg-dynamic-allow-cookie-fallback', 'cfg-strict-api-paths', 'cfg-dynamic-document-paths', 'cfg-dynamic-cookie-tag-hex', 'cfg-cookie-document-require-fetch']"
+      "detail": "visible=['strict-api-path-tags', 'document-path-tags', 'strict-api-path-input', 'document-path-input', 'cfg-cookie-document-require-fetch', 'help-text'], hidden_fixed=['cfg-key-mode', 'cfg-dynamic-strict-sign', 'cfg-dynamic-sign-ratio-fail', 'cfg-dynamic-allow-cookie-fallback', 'cfg-dynamic-cookie-tag-hex', 'cfg-cookie-name', 'cfg-cookie-bootstrap', 'cfg-cookie-safe-methods', 'cfg-replay-enabled']"
     },
     {
       "suite": "webui",
-      "name": "config save enforces dynamic-only",
+      "name": "config save keeps standard JSON remarks and indentation",
       "observed": "ALLOW",
       "expected": "ALLOW",
       "status": "PASS",
-      "detail": "static/legacy/secret inputs removed"
+      "detail": "fixed fields removed; standard JSON remarks and indentation preserved"
     },
     {
       "suite": "webui",
@@ -378,7 +394,7 @@
       "observed": "ALLOW",
       "expected": "ALLOW",
       "status": "PASS",
-      "detail": "elapsed=0.0298s, rps=10081.7, denied=0"
+      "detail": "elapsed=0.0299s, rps=10024.3, denied=0"
     }
   ],
   "config": "<runtime-config.json>",

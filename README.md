@@ -1,6 +1,6 @@
-# MA-RFW — MoeArt Replay Firewall v4.3.0
+# MA-RFW — MoeArt Replay Firewall v4.3.1
 
-针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.0 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
+针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.1 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
 
 ## 特性
 
@@ -19,7 +19,7 @@
 - 历史统计图表（拒绝趋势 + 请求量 + 原因分布）
 - 零外部依赖（纯 Lua + ngx.shared.DICT）
 
-> v4.3.0 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 RFWDATA；`dynamic_allow_cookie_fallback=false`，删除 RFWDATA 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
+> v4.3.1 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 RFWDATA；`dynamic_allow_cookie_fallback=false`，删除 RFWDATA 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
 
 ## 文件结构
 
@@ -129,7 +129,7 @@ nginx -s reload
 
 ### Dynamic-only 密钥策略
 
-v4.3.0 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；配置中的 `key_mode` 必须为 `dynamic`，任何 static 声明都会被拒绝。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用 dynamic key 和默认 32 hex HMAC tag。旧 `config.secret`、static Cookie、旧三段式 Cookie 和 legacy 兼容字段均不再接受。
+v4.3.1 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
 
 ### 签名请求（优先）
 
@@ -147,7 +147,7 @@ dynamic-only 严格模式下，非文档请求默认要求当前 dynamic RFWDATA
 
 ### 文档识别与 Cookie 发送时机
 
-v4.3 将“是否允许文档 bootstrap”和“是否把待刷新的 Cookie 写入响应”拆成两个阶段。access 阶段只使用 `dynamic_document_paths` 精确路径白名单或 Nginx `$rfw_document 1` 显式标记；它不会使用 `Accept`、尾斜杠或 `Sec-Fetch-Dest` 作为安全放行条件。`/api/`、`/graphql`、`/vN/`、`Controller/`、`.do` 等路径在 Header Gate 中始终要求 dynamic RFWDATA。只有管理员显式开启 `dynamic_allow_cookie_fallback` 时，少量同步 XHR 才可改由已有有效 dynamic `_RFW` Cookie 进入完整 Cookie 校验；伪造文档请求头不能绕过该要求。
+v4.3 将“是否允许文档 bootstrap”和“是否把待刷新的 Cookie 写入响应”拆成两个阶段。access 阶段只使用 `dynamic_document_paths` 精确路径白名单或 Nginx `$rfw_document 1` 显式标记；它不会使用 `Accept`、尾斜杠或 `Sec-Fetch-Dest` 作为安全放行条件。`/api/`、`/graphql`、`/vN/`、`Controller/`、`.do` 等路径在 Header Gate 中始终要求 dynamic RFWDATA。只有管理员在配置文件中显式开启 `dynamic_allow_cookie_fallback` 时，少量同步的 GET/HEAD/OPTIONS 请求才可改由已有有效 dynamic `_RFW` Cookie 进入完整 Cookie 校验；POST/PUT/PATCH/DELETE 即使开启该项也必须携带 RFWDATA。伪造文档请求头不能绕过该要求。
 
 对于已经通过校验、需要刷新 Cookie 的安全 GET/HEAD，RFW 在 access 阶段只登记 pending Cookie。header_filter 阶段再读取 upstream 的响应状态和 `Content-Type`：仅当状态小于 400 且 MIME 为 `text/html`（允许参数，如 `text/html; charset=UTF-8`）时，才真正写出 `Set-Cookie`；JSON、JavaScript、图片、错误页不会收到文档 Cookie。**MIME 是响应写入确认，不是 access 放行依据。**
 
@@ -155,7 +155,7 @@ v4.3 将“是否允许文档 bootstrap”和“是否把待刷新的 Cookie 写
 
 - 默认按 IP 统计签名占比，低于阈值的受保护请求进入 `sign-ratio-low` 拒绝和封禁链；静态扩展名资源不参与该比例统计。
 - 带有效 dynamic RFWDATA 的请求跳过 `_RFW` Cookie 校验，但仍完成 Header 的时间、nonce、body、URI、方法和绑定检查。
-- 默认无 RFWDATA 的受保护请求直接拒绝；仅当管理员显式开启 `dynamic_allow_cookie_fallback` 时，才对已有 dynamic `_RFW` 执行 HMAC、ts 新鲜度、会话序号和重放检查。
+- 默认无 RFWDATA 的受保护请求直接拒绝；仅当管理员显式开启 `dynamic_allow_cookie_fallback` 时，才对已有 dynamic `_RFW` 执行 HMAC、ts 新鲜度、会话序号、有限重放、比例和封禁检查。
 - static 密钥、旧 secret、旧 Cookie 和旧三段式格式均不再进入兼容链。
 
 ### 静态资源
@@ -166,49 +166,38 @@ GET/HEAD 且扩展名在静态表 → 跳过签名/比例统计，只做封禁�
 
 dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。若 Token 接口失败或超时，业务请求不会被当作可信无签名请求放行；请求会按失败路径结束并可由上层重试。
 
-Dynamic 模式下，HMAC、时效和序号仍然检查；但 `cookie_safe_methods` 中的幂等方法（默认 `GET`、`HEAD`、`OPTIONS`）不累计同一合法 Cookie 的并行复用次数，并允许已通过 HMAC 的过期 Cookie 进行无感刷新。对于浏览器重启后 dynamic key record 已完全过期的场景，`cookie_rebootstrap_document=true` 只对 `dynamic_document_paths` 或 exact `$rfw_document` 入口的 GET/HEAD 重新进入 bootstrap，默认兼容缺少 Fetch Metadata 的 Firefox/urllib/旧代理；API、Controller、`.do`、POST/PUT/PATCH/DELETE 和非文档 GET 不享受该重引导。待刷新的 Cookie 仍需等 upstream HTML 响应在 `header_filter` 中确认后才写出。设置 `cookie_document_require_fetch_metadata=true` 可进一步收紧为必须携带 `Sec-Fetch-Dest=document`。
+Dynamic 模式下，HMAC、时效和序号始终检查。GET、HEAD、OPTIONS 可以在同一页面并发期间复用同一合法 Cookie，但同值安全请求最多 8 次；POST/PUT/PATCH/DELETE 会按 `cookie_replay_window` 和 `cookie_replay_max` 执行更严格的同值重放限制。已通过 HMAC 的过期 Cookie 只有安全文档 GET/HEAD 可以无感刷新；浏览器重启后 dynamic key record 完全过期时，也只有 `dynamic_document_paths` 或 exact `$rfw_document` 入口允许重新 bootstrap。API、Controller、`.do`、写请求和非文档 GET 不享受该重引导。待刷新的 Cookie 仍需等 upstream HTML 响应在 `header_filter` 中确认后才写出。设置 `cookie_document_require_fetch_metadata=true` 可进一步收紧为必须携带 `Sec-Fetch-Dest=document`。
 
 ## 配置说明（config.json）
 
+配置文件采用标准 JSON；所有以 `__COMMENT_` 开头的字段都是中文备注，运行时、WebUI 和测试工具会在载入配置后忽略这些备注字段。WebUI 保存时使用 2 个空格缩进写回完整 JSON，不会压缩成单行。dynamic-only、RFWDATA 严格校验、IP/UA 绑定、`_RFW` Cookie 名称、Cookie 安全方法、Bootstrap、重放检测开关、共享字典名称以及 HMAC 标签长度都属于代码固定策略，不再写入 `config.json`。如果手工重新加入这些固定字段，Lua 会直接报配置错误。
+
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `key_mode` | `dynamic` | v4.3.0 固定 dynamic-only；其他值直接拒绝 |
-| `dynamic_strict_sign` | `true` | 非文档请求强制当前 dynamic RFWDATA |
-| `dynamic_sign_ratio_fail` | `true` | 低签名比例计入失败/封禁链；请求本身进入 `sign-ratio-low` 拒绝 |
-| `dynamic_allow_cookie_fallback` | `false` | 默认不允许无 RFWDATA 请求凭 `_RFW` 进入 Cookie 兼容例外 |
-| legacy secret / legacy Cookie | 已移除 | 不再兼容旧 secret、static Cookie 或旧三段式 Cookie |
-| `strict_api_paths` | `[]` | dynamic 严格 API 前缀；空数组表示全部非文档受保护请求 |
-| `dynamic_cookie_tag_hex` | `32` | dynamic Cookie HMAC 截断长度，建议至少 32 |
-| `key_ttl` | 1800 | 动态密钥有效期（秒） |
-| `key_grace` | 90 | 密钥过渡期（旧密钥仍有效，秒） |
-| `key_advance_refresh` | 30 | 提前刷新阈值（秒） |
-| `key_bind_ip` | `true` | 密钥绑定客户端 IP |
-| `key_bind_ua` | `true` | 密钥绑定 User-Agent |
-| `key_fetch_quota` | 1000 | 密钥发放日配额（0=无限） |
-| `key_quota_window` | 86400 | 配额窗口（秒） |
-| `token_rate_limit` | 10 | token 端点频率限制（次/分钟，0=无限） |
-| `token_rate_window` | 60 | 频率限制窗口（秒） |
-| `shared_dict.dict_name` | `rfw` | 共享内存字典名（需与 nginx.conf 一致） |
-| `sign_enabled` | `true` | 签名校验开关 |
-| `sign_window` | 60 | 签名 ts 时效窗口（秒） |
-| `sign_ratio_req/min` | 10 / 0.5 | 签名占比判定阈值 |
-| `cookie_name` | `_RFW` | cookie 名称 |
-| `cookie_ttl` | 86400 | cookie 生命周期（秒） |
-| `cookie_ts_max` | 300 | cookie ts 新鲜度上限（秒）；动态前端另有 30 秒心跳 |
-| `cookie_replay_window` | 2 | 同值并行宽限（秒） |
-| `cookie_replay_max` | 5 | 窗口外同值可消费次数；仅对非安全方法严格累计 |
-| `cookie_safe_methods` | `GET, HEAD, OPTIONS` | 动态模式下不累计同值并发且允许安全刷新 Cookie 的方法 |
-| `cookie_rebootstrap_document` | `true` | dynamic key record 过期后，是否允许配置文档 GET/HEAD 重新进入 bootstrap |
-| `dynamic_document_paths` | `["/", "/portal-web/"]` | dynamic 文档精确路径白名单；建议只填写真正返回 HTML 的入口 |
-| `cookie_document_require_fetch_metadata` | `false` | 文档 bootstrap 是否额外要求 `Sec-Fetch-Dest=document`；Firefox/urllib 兼容默认 false，API 仍 strict |
-| `cookie_missing_max` | 50 | 单 IP 无 cookie 日配额（0=关） |
-| `fail_max / fail_window` | 5 / 60 | 惩罚阈值 |
-| `block_time` | 600 | 封禁时长（秒） |
-| `sweep_interval` | 60 | 后台清扫间隔（秒） |
-| `snap_log_interval` | 1800 | SNAP 快照落盘最小间隔（秒，0=每次清扫都写） |
-| `admin_whitelist` | `["127.0.0.1","::1"]` | 管理面板白名单（留空=允许所有） |
-| `admin_trusted_proxies` | `[]` | 受信反代 IP（仅当 remote_addr 在此列表时解析 XFF） |
-| `debug` | `false` | 调试模式（写入 rfw.error.log） |
+| `dynamic_document_paths` | `["/", "/portal-web/"]` | 文档 HTML 精确路径；WebUI 使用回车添加标签 |
+| `strict_api_paths` | `[]` | 额外严格 API 前缀；WebUI 使用回车添加标签，空数组表示默认严格策略 |
+| `key_ttl` / `key_grace` | 1800 / 90 | 动态密钥有效期与新旧密钥过渡期（秒） |
+| `key_advance_refresh` | 30 | 动态密钥提前刷新阈值（秒） |
+| `key_fetch_quota` / `key_quota_window` | 1000 / 86400 | 密钥发放配额与统计窗口 |
+| `token_rate_limit` / `token_rate_window` | 10 / 60 | Token 接口频率限制与统计窗口 |
+| `dynamic_allow_cookie_fallback` | `false` | 不在 WebUI 展示；仅能手工开启。开启后只允许 GET/HEAD/OPTIONS 使用已有有效 dynamic Cookie 兜底，写请求仍需 RFWDATA |
+| `cookie_ttl` | 86400 | Cookie 生命周期（秒） |
+| `cookie_ts_max` | 300 | Cookie 签名时间戳新鲜度上限（秒） |
+| `cookie_replay_window` | 2 | 非安全方法同值 Cookie 的并发宽限窗口（秒） |
+| `cookie_replay_max` | 5 | 非安全方法窗口外同值 Cookie 的最大消费次数 |
+| `cookie_document_require_fetch_metadata` | `false` | 文档重新引导是否额外要求 `Sec-Fetch-Dest=document` |
+| `cookie_missing_max` / `cookie_missing_ttl` | 50 / 86400 | 单 IP 无 Cookie 计数上限与统计窗口 |
+| `sign_window` | 60 | RFWDATA 时间戳有效窗口（秒） |
+| `sign_ratio_req` / `sign_ratio_min` | 10 / 0.5 | 签名比例统计起始请求数与最低比例 |
+| `cookie_ratio_req` / `cookie_ratio_min` | 10 / 0.5 | Cookie 兜底比例统计起始请求数与最低比例 |
+| `seq_slack` / `seq_ttl` / `seq_cache_ttl` | 10 / 86400 / 3 | Cookie 会话序号容差、保留期和内存缓存 TTL |
+| `replay_threshold` / `replay_relink_sec` | 5 / 2 | 请求重放阈值与二次校验窗口；重放检测开关固定开启 |
+| `fail_max` / `fail_window` | 5 / 60 | 失败计数封禁阈值与统计窗口 |
+| `block_time` / `block_cache_ttl` | 600 / 60 | IP 封禁时间与封禁缓存 TTL |
+| `sweep_interval` / `snap_log_interval` | 60 / 1800 | 后台清扫和 SNAP 日志落盘周期 |
+| `admin_whitelist` | `[...]` | 管理面板 IP/CIDR 白名单；留空表示允许所有 |
+| `admin_trusted_proxies` | `[]` | 受信反代 IP；仅当 remote_addr 在此列表时解析转发头 |
+| `debug` | `false` | 调试模式；生产建议关闭 |
 
 ### API 端点
 
@@ -244,7 +233,7 @@ Dynamic 模式下，HMAC、时效和序号仍然检查；但 `cookie_safe_method
 
 ## 测试
 
-v4.3.0 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、RFWDATA 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
+v4.3.1 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、RFWDATA 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
 
 ```bash
 cd replayfirewall_hardened_v4_3
@@ -255,4 +244,4 @@ python3 tools/rfw_v4_test.py \
   --md-out /tmp/rfw_v4_test.md
 ```
 
-测试通过标准为 `failed=0`。当前 v4.3.0 dynamic-only 基线为 **47/47 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 RFWDATA、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.0 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，避免每请求重新编译 Lua 和文件 I/O。
+测试通过标准为 `failed=0`。当前 v4.3.1 dynamic-only 基线为 **49/49 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 RFWDATA、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.1 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，避免每请求重新编译 Lua 和文件 I/O。

@@ -29,28 +29,42 @@ do
     local content = f:read("*a"); f:close()
     config = cjson.decode(content)
     for k in pairs(config) do
-        if k:sub(1, 3) == "___" then config[k] = nil end
+        if k:sub(1, 2) == "__" then config[k] = nil end
+    end
+    local forbidden_config_keys = {
+        "key_mode", "dynamic_strict_sign", "dynamic_sign_ratio_fail", "dynamic_cookie_tag_hex",
+        "sign_enabled", "replay_enabled", "key_bind_ip", "key_bind_ua", "cookie_name",
+        "cookie_bootstrap", "cookie_safe_methods", "cookie_rebootstrap_document", "static_ext",
+        "secret", "dynamic_allow_legacy_secret", "dynamic_allow_legacy_cookie", "shared_dict",
+    }
+    for _, k in ipairs(forbidden_config_keys) do
+        if config[k] ~= nil then error("ma_rfw: config field " .. k .. " is fixed in this build") end
     end
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
+-- v4.3.1 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
-if config.key_mode ~= nil and config.key_mode ~= "dynamic" then
-    error("ma_rfw: this gray-release build only supports key_mode=dynamic")
-end
--- 灰度高安全策略：不再兼容 static 密钥、旧 secret RFWDATA 或旧 Cookie。
 local DYN_STRICT_SIGN = true
--- Cookie 不是 dynamic Header 的替代品；只有显式开启时才允许少量特殊请求兜底。
+local SIGN_ENABLED = true
+local REPLAY_ENABLED = true
+local KEY_BIND_IP = true
+local KEY_BIND_UA = true
+local DYN_COOKIE_TAG_HEX = 32
+local COOKIE_TAG_HEX = DYN_COOKIE_TAG_HEX
+local COOKIE_NAME = "_RFW"
+local COOKIE_BOOTSTRAP = true
+local COOKIE_REBOOTSTRAP_DOCUMENT = true
+local COOKIE_SAFE_METHODS = { GET = true, HEAD = true, OPTIONS = true }
+local COOKIE_FALLBACK_METHODS = { GET = true, HEAD = true, OPTIONS = true }
+local COOKIE_SAFE_REPLAY_MAX = 8
+-- Cookie 兜底是显式兼容例外，默认关闭；开启后仍受 HMAC、时效、序号、重放、比例和封禁限制。
 local DYN_ALLOW_COOKIE_FALLBACK = config.dynamic_allow_cookie_fallback == true
 local STRICT_API_PATHS  = type(config.strict_api_paths) == "table" and config.strict_api_paths or {}
 local DYNAMIC_DOCUMENT_PATHS = type(config.dynamic_document_paths) == "table" and config.dynamic_document_paths or {}
-local DYN_COOKIE_TAG_HEX = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32))
-local COOKIE_TAG_HEX = DYN_COOKIE_TAG_HEX
 local KEY_TTL          = config.key_ttl or 1800
 local KEY_GRACE        = config.key_grace or 90
 local KEY_ADVANCE      = config.key_advance_refresh or 30
-local KEY_BIND_IP      = config.key_bind_ip ~= false
-local KEY_BIND_UA      = config.key_bind_ua ~= false
 local KEY_FETCH_QUOTA  = config.key_fetch_quota or 1000
 local KEY_QUOTA_WINDOW = config.key_quota_window or 86400
 local TOKEN_RATE_LIMIT = config.token_rate_limit or 10
@@ -183,10 +197,9 @@ local function generate_key_pair()
     return key, key_id
 end
 
--- ===== 存储后端: ngx.shared.DICT =====
-local sd_config = config.shared_dict or {}
-local DICT_NAME = sd_config.dict_name or "rfw"
-local MKEY_PREFIX = sd_config.key_prefix or "rfw:"
+-- ===== 存储后端: ngx.shared.DICT（部署名称固定） =====
+local DICT_NAME = "rfw"
+local MKEY_PREFIX = "rfw:"
 
 local store = ngx.shared[DICT_NAME]
 if not store then
@@ -270,8 +283,7 @@ local function check_token_rate(ip, ua_h)
     return count > TOKEN_RATE_LIMIT
 end
 
-local COOKIE_NAME = config.cookie_name or "_RFW"
-local COOKIE_TTL  = config.cookie_ttl or 86400
+local COOKIE_TTL  = math.max(60, math.min(604800, tonumber(config.cookie_ttl) or 86400))
 
 local nonce_counter = 0
 local function new_nonce()
@@ -430,31 +442,23 @@ local RATIO_MAX_IP = 5000
 local seq_cache = {}
 
 local DEBUG = config.debug
-local SIGN_ENABLED = config.sign_enabled
-local REPLAY_ENABLED = config.replay_enabled
 local BLOCK_CACHE_TTL = config.block_cache_ttl or 60
 local SIGN_WINDOW = config.sign_window or 60
 local SWEEP_INTERVAL = config.sweep_interval
 local SNAP_LOG_INTERVAL = config.snap_log_interval or 1800
 local COOKIE_MISS_MAX = config.cookie_missing_max or 0
 local MISS_TTL = config.cookie_missing_ttl or 86400
-local COOKIE_TS_MAX = config.cookie_ts_max or 0
-local COOKIE_BOOTSTRAP = config.cookie_bootstrap ~= false
-local COOKIE_REPLAY_WINDOW = config.cookie_replay_window or 2
-local COOKIE_REPLAY_MAX = config.cookie_replay_max or 5
+local COOKIE_TS_MAX = math.max(1, math.min(3600, tonumber(config.cookie_ts_max) or 300))
+local COOKIE_REPLAY_WINDOW = math.max(0, math.min(30, tonumber(config.cookie_replay_window) or 2))
+local COOKIE_REPLAY_MAX = math.max(1, math.min(100, tonumber(config.cookie_replay_max) or 5))
 local REPLAY_RELINK_SEC = config.replay_relink_sec or 2
 local SEQ_SLACK = config.seq_slack or 10
 local SEQ_TTL = config.seq_ttl or COOKIE_TTL
 local SEQ_CACHE_TTL = config.seq_cache_ttl or 3
 
 -- 动态 WebApp 通常会并发发起多个幂等 GET。对这些方法仍要求
--- Cookie HMAC 正确，但不把同一个合法 Cookie 的并行复用当成重放。
--- 状态改变请求(POST/PUT/PATCH/DELETE)继续走严格序号/重放策略。
-local COOKIE_SAFE_METHODS = {}
-for _, method in ipairs(config.cookie_safe_methods or {"GET", "HEAD", "OPTIONS"}) do
-    COOKIE_SAFE_METHODS[tostring(method):upper()] = true
-end
-local COOKIE_REBOOTSTRAP_DOCUMENT = config.cookie_rebootstrap_document ~= false
+-- Cookie HMAC 正确，并允许有限的同值并发复用；同一 Cookie 的安全方法最多 8 次。
+-- 状态改变请求(POST/PUT/PATCH/DELETE)继续走更严格的序号/重放策略。
 -- Firefox、urllib、旧代理可能不发送 Sec-Fetch-Dest；默认兼容文档 bootstrap。
 -- API 仍由 dynamic_header_required() 严格拦截。设为 true 可启用更严格的 Fetch Metadata 要求。
 local COOKIE_DOCUMENT_REQUIRE_FETCH = config.cookie_document_require_fetch_metadata == true
@@ -929,7 +933,7 @@ local function track_sign_ratio(ip, ua, has_signed)
         local okc, tot = t.ok, t.total
         sign_ratio_track[key] = nil
         sign_ratio_entries = sign_ratio_entries - 1
-        local ratio_fail = config.dynamic_sign_ratio_fail ~= false
+        local ratio_fail = true
         if ratio_fail then record_failure(ip, "sign-ratio-low") end
         return true, okc, tot
     end
@@ -938,7 +942,10 @@ end
 
 local static_ext_set = {}
 do
-    for _, e in ipairs(config.static_ext or {}) do static_ext_set[e] = true end
+    for _, e in ipairs({
+        ".html", ".htm", ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+        ".webp", ".bmp", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map", ".pdf"
+    }) do static_ext_set[e] = true end
 end
 
 local function is_static()
@@ -1109,7 +1116,10 @@ function _M.run()
         -- Controller/.do/API 仍不能仅凭文档头、Accept 或 MIME 放行。
         -- 但已有 dynamic _RFW Cookie 要继续进入下面的完整校验链，
         -- 以兼容少量同步 XHR；无 Cookie 仍严格拒绝。
-        headerless_cookie_fallback = DYN_ALLOW_COOKIE_FALLBACK and get_cookie_value(COOKIE_NAME) ~= nil
+        local fallback_method = tostring(ngx_req.get_method() or "GET"):upper()
+        headerless_cookie_fallback = DYN_ALLOW_COOKIE_FALLBACK
+            and COOKIE_FALLBACK_METHODS[fallback_method] == true
+            and get_cookie_value(COOKIE_NAME) ~= nil
         if not headerless_cookie_fallback then
             record_failure(ip, "dynamic-sign-missing")
             return deny("dynamic-sign-missing")
@@ -1156,14 +1166,14 @@ function _M.run()
                 replay_entries = replay_entries + 1
             end
             t[fp] = (t[fp] or 0) + 1
-            if t[fp] >= config.replay_threshold then
+            if t[fp] >= (config.replay_threshold or 5) then
                 replay_track[key] = nil
                 replay_entries = replay_entries - 1
                 record_failure(ip, "request-replay")
                 local d = mk_detail()
                 detail_add(d, "fingerprint_sha256", fp)
                 detail_add(d, "repeat_count", tostring(t[fp]))
-                detail_add(d, "threshold", tostring(config.replay_threshold))
+                detail_add(d, "threshold", tostring(config.replay_threshold or 5))
                 return deny("request-replay", d)
             end
         end
@@ -1280,8 +1290,25 @@ function _M.run()
         local highest, last_seq, last_ts, last_first, last_count = read_seq(sid)
         if last_seq ~= nil and last_ts ~= nil and last_seq == seq and last_ts == t then
             if safe_method then
-                -- 安全幂等请求可能在同一页面加载中共享一个 Cookie。
-                -- HMAC、时效和序号回退仍受检，但不累计同值重放次数。
+                -- 安全幂等请求允许有限并发，但不能无限重放同一个 Cookie。
+                local cnt = (last_count or 1) + 1
+                if COOKIE_SAFE_REPLAY_MAX > 0 and cnt > COOKIE_SAFE_REPLAY_MAX then
+                    record_failure(ip, "cookie-replay")
+                    incr_stat("cookie_replay", 1)
+                    local d = mk_detail()
+                    detail_add(d, "sid", sid or "")
+                    detail_add(d, "replay_count", tostring(cnt))
+                    detail_add(d, "replay_limit", tostring(COOKIE_SAFE_REPLAY_MAX))
+                    return deny("cookie-replay", d)
+                end
+                write_seq(sid, now, highest or 0, seq, t, last_first, cnt)
+                local r, okc, tot = track_cookie(ip, true)
+                if r then
+                    local d = mk_detail()
+                    detail_add(d, "cookie_ok_in_window", tostring(okc))
+                    detail_add(d, "total_in_window", tostring(tot))
+                    return deny("cookie-ratio-low", d)
+                end
                 incr_stat("cookie_ok", 1)
                 return
             end
