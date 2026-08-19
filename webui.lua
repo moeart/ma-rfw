@@ -1,9 +1,10 @@
 local cjson = require("cjson")
 local io = require("io")
+local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "3.0.0"
+local VERSION = "4.3.0"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -151,6 +152,32 @@ local function get_block_log()
         return core.block_log
     end
     return {}
+end
+
+-- ============================================================
+-- Minified JS (rfw.js → memory cache)
+-- ============================================================
+
+local minified_js_cache = nil
+
+local function minify_js(code)
+    code = code:gsub("/%*.-%*/", "")
+    code = code:gsub("//[^\n]*", "")
+    code = code:gsub("%s+", " ")
+    code = code:match("^%s*(.-)%s*$")
+    return code
+end
+
+local function get_minified_js()
+    if minified_js_cache then return minified_js_cache end
+    local f = io.open(plugin_dir .. "/rfw.js", "rb")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    -- 灰度版本固定 dynamic-only；不把可被页面脚本篡改的 window 全局变量
+    -- 作为安全模式选择器。客户端脚本本身也固定运行 dynamic 分支。
+    minified_js_cache = minify_js(content)
+    return minified_js_cache
 end
 
 local function fmt_uptime(sec)
@@ -511,6 +538,96 @@ local CONFIG_HTML = [[<!DOCTYPE html>
   </div>
 
   <div class="section">
+    <h3>动态密钥 (Dynamic Token)</h3>
+    <div class="form-row">
+      <div class="form-group">
+        <label>密钥模式</label>
+        <input id="cfg-key-mode" value="dynamic（灰度版固定）" disabled>
+      </div>
+      <div class="form-group">
+        <label>Dynamic 严格 Header Gate</label>
+        <input id="cfg-dynamic-strict-sign" value="true" disabled>
+      </div>
+      <div class="form-group">
+        <label>Dynamic 低签名比例失败链</label>
+        <input id="cfg-dynamic-sign-ratio-fail" value="true" disabled>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>无 RFWDATA 的 Cookie fallback</label>
+        <select id="cfg-dynamic-allow-cookie-fallback"><option value="false">禁用（推荐，RFWDATA-only）</option><option value="true">仅兼容特殊请求</option></select>
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>严格 API 路径（逗号分隔，空=全部）</label>
+        <input type="text" id="cfg-strict-api-paths" placeholder="/api/,/portal-web/portal/">
+      </div>
+      <div class="form-group">
+        <label>Dynamic Cookie HMAC 长度（hex）</label>
+        <input type="number" id="cfg-dynamic-cookie-tag-hex" value="32" min="16" max="64" step="2">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Dynamic 文档精确路径（逗号分隔）</label>
+        <input type="text" id="cfg-dynamic-document-paths" placeholder="/,/portal-web/">
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <p style="font-size:13px;color:var(--text2);margin-top:8px">灰度版固定使用 dynamic-only；不接受 static 密钥、旧 secret 回退或旧 Cookie 格式。默认 RFWDATA-only，关闭 Cookie fallback。严格 Header Gate 会让非文档 API 必须携带当前 dynamic RFWDATA。</p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>密钥有效期 TTL (秒)</label>
+        <input type="number" id="cfg-key-ttl" value="1800">
+      </div>
+      <div class="form-group">
+        <label>密钥过渡期 grace (秒)</label>
+        <input type="number" id="cfg-key-grace" value="90">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>提前刷新阈值 (秒)</label>
+        <input type="number" id="cfg-key-advance-refresh" value="30">
+      </div>
+      <div class="form-group">
+        <label>密钥发放配额 (0=无限)</label>
+        <input type="number" id="cfg-key-fetch-quota" value="1000">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>配额窗口 (秒)</label>
+        <input type="number" id="cfg-key-quota-window" value="86400">
+      </div>
+      <div class="form-group">
+        <label>token 接口频率限制 (次/分钟, 0=无限)</label>
+        <input type="number" id="cfg-token-rate-limit" value="10">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>频率限制窗口 (秒)</label>
+        <input type="number" id="cfg-token-rate-window" value="60">
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>绑定 IP</label>
+        <select id="cfg-key-bind-ip"><option value="true">启用</option><option value="false">禁用</option></select>
+      </div>
+      <div class="form-group">
+        <label>绑定 User-Agent</label>
+        <select id="cfg-key-bind-ua"><option value="true">启用</option><option value="false">禁用</option></select>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
     <h3>Cookie 配置</h3>
     <div class="form-row">
       <div class="form-group">
@@ -525,7 +642,7 @@ local CONFIG_HTML = [[<!DOCTYPE html>
     <div class="form-row">
       <div class="form-group">
         <label>Cookie ts 上限 (秒)</label>
-        <input type="number" id="cfg-cookie-ts-max" value="60">
+        <input type="number" id="cfg-cookie-ts-max" value="300">
       </div>
       <div class="form-group">
         <label>Cookie Bootstrap</label>
@@ -541,6 +658,20 @@ local CONFIG_HTML = [[<!DOCTYPE html>
         <label>同值可消费次数</label>
         <input type="number" id="cfg-cookie-replay-max" value="5">
       </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>动态安全方法 (逗号分隔)</label>
+        <input type="text" id="cfg-cookie-safe-methods" value="GET,HEAD,OPTIONS">
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>文档重引导 Fetch Metadata</label>
+        <select id="cfg-cookie-document-require-fetch"><option value="false">兼容 Firefox/urllib（推荐）</option><option value="true">严格要求 document</option></select>
+      </div>
+      <div class="form-group"></div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -706,9 +837,21 @@ function loadConfig(){
   fetch('/cgi-rfw/api/config').then(function(r){return r.json()}).then(function(c){
     setBool('cfg-sign-enabled',c.sign_enabled);setVal('cfg-sign-window',c.sign_window);
     setVal('cfg-sign-ratio-req',c.sign_ratio_req);setVal('cfg-sign-ratio-min',c.sign_ratio_min);
+    setVal('cfg-key-mode',c.key_mode||'dynamic');setBool('cfg-dynamic-strict-sign',true);setBool('cfg-dynamic-sign-ratio-fail',true);
+    setBool('cfg-dynamic-allow-cookie-fallback',c.dynamic_allow_cookie_fallback===true);
+    setVal('cfg-strict-api-paths',Array.isArray(c.strict_api_paths)?c.strict_api_paths.join(','):'');
+    setVal('cfg-dynamic-document-paths',Array.isArray(c.dynamic_document_paths)?c.dynamic_document_paths.join(','):'/,'+'/portal-web/');
+    setVal('cfg-dynamic-cookie-tag-hex',c.dynamic_cookie_tag_hex==null?32:c.dynamic_cookie_tag_hex);
+    setVal('cfg-key-ttl',c.key_ttl);
+    setVal('cfg-key-grace',c.key_grace);setVal('cfg-key-advance-refresh',c.key_advance_refresh);
+    setVal('cfg-key-fetch-quota',c.key_fetch_quota);setVal('cfg-key-quota-window',c.key_quota_window);
+    setVal('cfg-token-rate-limit',c.token_rate_limit);setVal('cfg-token-rate-window',c.token_rate_window);
+    setBool('cfg-key-bind-ip',c.key_bind_ip);setBool('cfg-key-bind-ua',c.key_bind_ua);
     setVal('cfg-cookie-name',c.cookie_name);setVal('cfg-cookie-ttl',c.cookie_ttl);
     setVal('cfg-cookie-ts-max',c.cookie_ts_max);setBool('cfg-cookie-bootstrap',c.cookie_bootstrap);
     setVal('cfg-cookie-replay-window',c.cookie_replay_window);setVal('cfg-cookie-replay-max',c.cookie_replay_max);
+    setVal('cfg-cookie-safe-methods',Array.isArray(c.cookie_safe_methods)?c.cookie_safe_methods.join(','):'GET,HEAD,OPTIONS');
+    setBool('cfg-cookie-document-require-fetch',c.cookie_document_require_fetch_metadata!==false);
     setVal('cfg-cookie-missing-max',c.cookie_missing_max);setVal('cfg-cookie-missing-ttl',c.cookie_missing_ttl);
     setVal('cfg-seq-slack',c.seq_slack);setVal('cfg-seq-ttl',c.seq_ttl);setVal('cfg-seq-cache-ttl',c.seq_cache_ttl);
     setBool('cfg-replay-enabled',c.replay_enabled);setVal('cfg-replay-threshold',c.replay_threshold);
@@ -727,12 +870,30 @@ function saveConfig(){
   cfg.sign_window=parseInt(getVal('cfg-sign-window'))||60;
   cfg.sign_ratio_req=parseInt(getVal('cfg-sign-ratio-req'))||10;
   cfg.sign_ratio_min=parseFloat(getVal('cfg-sign-ratio-min'))||0.5;
+  cfg.key_mode='dynamic';
+  cfg.dynamic_strict_sign=true;
+  cfg.dynamic_sign_ratio_fail=true;
+  cfg.dynamic_allow_cookie_fallback=getVal('cfg-dynamic-allow-cookie-fallback')==='true';
+  cfg.strict_api_paths=(getVal('cfg-strict-api-paths')||'').split(',').map(function(s){return s.trim()}).filter(function(s){return !!s});
+  cfg.dynamic_document_paths=(getVal('cfg-dynamic-document-paths')||'/,/portal-web/').split(',').map(function(s){return s.trim()}).filter(function(s){return !!s});
+  cfg.dynamic_cookie_tag_hex=Math.max(16,Math.min(64,parseInt(getVal('cfg-dynamic-cookie-tag-hex'))||32));
+  cfg.key_ttl=parseInt(getVal('cfg-key-ttl'))||1800;
+  cfg.key_grace=parseInt(getVal('cfg-key-grace'))||90;
+  cfg.key_advance_refresh=parseInt(getVal('cfg-key-advance-refresh'))||30;
+  cfg.key_fetch_quota=parseInt(getVal('cfg-key-fetch-quota'))||1000;
+  cfg.key_quota_window=parseInt(getVal('cfg-key-quota-window'))||86400;
+  cfg.token_rate_limit=parseInt(getVal('cfg-token-rate-limit'))||10;
+  cfg.token_rate_window=parseInt(getVal('cfg-token-rate-window'))||60;
+  cfg.key_bind_ip=getVal('cfg-key-bind-ip')==='true';
+  cfg.key_bind_ua=getVal('cfg-key-bind-ua')==='true';
   cfg.cookie_name=getVal('cfg-cookie-name')||'_RFW';
   cfg.cookie_ttl=parseInt(getVal('cfg-cookie-ttl'))||86400;
-  cfg.cookie_ts_max=parseInt(getVal('cfg-cookie-ts-max'))||60;
+  cfg.cookie_ts_max=parseInt(getVal('cfg-cookie-ts-max'))||300;
   cfg.cookie_bootstrap=getVal('cfg-cookie-bootstrap')==='true';
   cfg.cookie_replay_window=parseInt(getVal('cfg-cookie-replay-window'))||2;
   cfg.cookie_replay_max=parseInt(getVal('cfg-cookie-replay-max'))||5;
+  cfg.cookie_safe_methods=(getVal('cfg-cookie-safe-methods')||'GET,HEAD,OPTIONS').split(',').map(function(s){return s.trim().toUpperCase()}).filter(function(s){return !!s});
+  cfg.cookie_document_require_fetch_metadata=getVal('cfg-cookie-document-require-fetch')==='true';
   cfg.cookie_missing_max=parseInt(getVal('cfg-cookie-missing-max'))||50;
   cfg.cookie_missing_ttl=parseInt(getVal('cfg-cookie-missing-ttl'))||86400;
   cfg.seq_slack=parseInt(getVal('cfg-seq-slack'))||10;
@@ -826,6 +987,7 @@ function renderLogTable(el,lines){
   h+='<thead><tr>'+LOG_COLS.map(function(c){return '<th style="text-align:left;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text2);position:sticky;top:0;z-index:1">'+escHtml(c[1])+'</th>'}).join('')+'</tr></thead><tbody>';
   lines.forEach(function(line){
     var o;try{o=JSON.parse(line)}catch(e){o=null}
+    if(o&&typeof o==='object'&&!Array.isArray(o) && o.attack_method==='SNAP')return;
     if(o&&typeof o==='object'&&!Array.isArray(o)){
       h+='<tr>'+LOG_COLS.map(function(c){
         var v=o[c[0]];
@@ -896,6 +1058,35 @@ local function handle_api_config_save()
     if not ok or type(data) ~= "table" then
         return json_response({success = false, message = "JSON 解析失败"}, 400)
     end
+
+    -- 灰度版本只允许 dynamic-only；Cookie fallback 仅接受显式布尔值。
+    data.key_mode = "dynamic"
+    data.secret = nil
+    data.dynamic_allow_legacy_secret = nil
+    data.dynamic_allow_legacy_cookie = nil
+    data.sign_ratio_fail = nil
+    data.cookie_ratio_fail = nil
+    data.dynamic_strict_sign = true
+    data.dynamic_sign_ratio_fail = true
+    data.dynamic_allow_cookie_fallback = data.dynamic_allow_cookie_fallback == true
+    if data.sign_enabled == false then
+        return json_response({success = false, message = "dynamic 灰度模式要求启用 sign_enabled"}, 400)
+    end
+    data.cookie_document_require_fetch_metadata = data.cookie_document_require_fetch_metadata ~= false
+    if type(data.dynamic_document_paths) ~= "table" then data.dynamic_document_paths = {"/", "/portal-web/"} end
+    local clean_doc_paths = {}
+    for _, p in ipairs(data.dynamic_document_paths) do
+        if type(p) == "string" and p ~= "" and #p <= 256 then clean_doc_paths[#clean_doc_paths + 1] = p end
+    end
+    data.dynamic_document_paths = clean_doc_paths
+    if type(data.strict_api_paths) ~= "table" then data.strict_api_paths = {} end
+    local clean_paths = {}
+    for _, p in ipairs(data.strict_api_paths) do
+        if type(p) == "string" and p ~= "" and #p <= 256 then clean_paths[#clean_paths + 1] = p end
+    end
+    data.strict_api_paths = clean_paths
+    local tag_hex = tonumber(data.dynamic_cookie_tag_hex) or 32
+    data.dynamic_cookie_tag_hex = math.max(16, math.min(64, math.floor(tag_hex / 2) * 2))
 
     -- 合并: 用前端数据覆盖当前配置, 保留 secret/shared_dict 等前端不发送的字段
     for k, v in pairs(data) do
@@ -1023,6 +1214,17 @@ local function handle_api_log()
     local filter = ngx.var.arg_filter
     local path = LOG_DIR_RFW .. "/" .. file
     local lines, size, truncated = read_tail_lines(path, 4 * 1024 * 1024)
+    -- SNAP 是内部累计快照，不属于用户请求事件；日志查看接口不返回它。
+    local visible = {}
+    for _, line in ipairs(lines) do
+        local is_snap = false
+        local ok, obj = pcall(cjson.decode, line)
+        if ok and type(obj) == "table" and obj.attack_method == "SNAP" then
+            is_snap = true
+        end
+        if not is_snap then visible[#visible + 1] = line end
+    end
+    lines = visible
     if filter and filter ~= "" then
         local filtered = {}
         local flt = filter:lower()
@@ -1148,11 +1350,110 @@ local function handle_api_history()
 end
 
 -- ============================================================
+-- Token Endpoint (dynamic mode)
+-- ============================================================
+
+local function handle_token()
+    local method = ngx.req.get_method()
+    if method ~= "GET" then
+        return json_response({error = "method_not_allowed"}, 405)
+    end
+
+    local core = _G.ma_rfw_core
+    if not core or core.KEY_MODE ~= "dynamic" then
+        return json_response({key = nil, expires_in = 0, server_time = ngx.time(),
+                              quota_exhausted = true, key_mode = "dynamic",
+                              strict_sign = true, dynamic_sign_ratio_fail = true,
+                              cookie_fallback = false,
+                              cookie_tag_hex = 32, cookie_document_require_fetch_metadata = false,
+                              dynamic_document_paths = config.dynamic_document_paths or {}}, 200)
+    end
+
+    local ip  = ngx.var.remote_addr or ""
+    local ua  = ngx.var.http_user_agent or ""
+    local ua_h = core.ua_hash(ua)
+    local bind_ip = (config.key_bind_ip ~= false) and ip or "0.0.0.0"
+
+    -- 频率限制
+    if core.check_token_rate(bind_ip, ua_h) then
+        local record = core.get_key_record(bind_ip, ua_h)
+        if record and record.current and record.current.expire > ngx.time() then
+            return json_response({
+                key = record.current.key,
+                expires_in = record.current.expire - ngx.time(),
+                server_time = ngx.time(),
+                quota_exhausted = true,
+                key_mode = "dynamic",
+                strict_sign = true,
+                dynamic_sign_ratio_fail = true,
+                cookie_fallback = config.dynamic_allow_cookie_fallback == true,
+                cookie_tag_hex = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32)),
+                cookie_document_require_fetch_metadata = config.cookie_document_require_fetch_metadata ~= false,
+                dynamic_document_paths = config.dynamic_document_paths or {}
+            })
+        end
+        return json_response({
+            key = nil, expires_in = 0,
+            server_time = ngx.time(), quota_exhausted = true,
+            key_mode = "dynamic",
+            strict_sign = true,
+            dynamic_sign_ratio_fail = true,
+            cookie_fallback = config.dynamic_allow_cookie_fallback == true,
+            cookie_tag_hex = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32))
+        })
+    end
+
+    local key, expire, quota_exhausted = core.rotate_key(bind_ip, ua_h)
+
+    local store = get_store()
+    local nonce_ttl = (config.sign_window or 60) + 10
+    ngx.header["Cache-Control"] = "no-store"
+    ngx.header["Pragma"] = "no-cache"
+    ngx.header["X-Content-Type-Options"] = "nosniff"
+
+    return json_response({
+        key = key,
+        expires_in = key and math.max(0, expire - ngx.time()) or 0,
+        cookie_ttl = config.cookie_ttl or 86400,
+        server_time = ngx.time(),
+        quota_exhausted = quota_exhausted,
+        key_mode = "dynamic",
+        strict_sign = true,
+        dynamic_sign_ratio_fail = true,
+        cookie_fallback = config.dynamic_allow_cookie_fallback == true,
+        cookie_tag_hex = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32)),
+        cookie_document_require_fetch_metadata = config.cookie_document_require_fetch_metadata ~= false,
+        dynamic_document_paths = config.dynamic_document_paths or {}
+    })
+end
+
+-- ============================================================
 -- Router
 -- ============================================================
 
 function _M.run()
     local uri = ngx.var.uri
+
+    -- 匿名接口绕过 admin_check
+    if uri == "/cgi-rfw/token" then
+        return handle_token()
+    end
+    if uri == "/cgi-rfw/rfw.min.js" then
+        local js = get_minified_js()
+        if not js then
+            ngx.status = 404
+            ngx.header["Content-Type"] = "text/plain; charset=utf-8"
+            ngx.say("rfw.js not found")
+            return ngx.exit(404)
+        end
+        ngx.status = 200
+        ngx.header["Content-Type"] = "application/javascript; charset=utf-8"
+        ngx.header["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        ngx.header["Pragma"] = "no-cache"
+        ngx.header["Expires"] = "-1"
+        ngx.say(js)
+        return ngx.exit(200)
+    end
 
     if not admin_check() then
         ngx.log(ngx.WARN, "admin: rejected ip=", get_admin_ip(),

@@ -1,50 +1,46 @@
 /*
  * rfw.js - 前端每请求签名拦截器(与 nginx ma_rfw.lua 配套)
  * 覆盖 fetch 与 XMLHttpRequest(axios 底层也是它们)
- * 只对同源请求签名; 同步 XHR 跳过(异步拿不到哈希)
+ * 只对同源请求签名; 同步 XHR 优先使用纯 JS 同步 SHA-256/HMAC，
+ * 只有密钥未就绪或请求体无法同步序列化时才由服务端 dynamic Cookie fallback 兜底。
+ *
+ * 灰度发布固定为 dynamic-only：短期密钥只从 /cgi-rfw/token 获取并定时轮换。
+ * 不信任任何 window 全局变量选择安全模式或提供密钥；客户端变量只能影响
+ * 脚本可用性，不能改变服务端 Header Gate 的安全结论。
  *
  * 签名格式(与 nginx 端完全一致):
  *   sign = HMAC-SHA256(secret, method + "|" + path?query + "|" + sha256hex(body) + "|" + ts + "|" + nonce)
  *   body 为空时 sha256hex("")
  * 发送时以单头融合: RFWDATA = ts + "." + nonce + "." + sign
- * nginx 验证通过后转发上游前移除 RFWDATA 头(上游看不到本插件)
- *
- * _RFW cookie 运动 Token(rfw.js 是唯一签发源, 服务器不再续期):
- *   _RFW = <sig>.<sid>.<seq>.<ts_ms>
- *   sig  = HMAC-SHA256(secret, "RFW:"+sid+","+seq+","+ts) 前 16 hex(小写)
- *   本文件加载后每 ~200ms 读后自增重签一次(读当前值 → seq = max(读到, 本地)+1),
- *   多标签页共享 cookie jar 也不回退 seq; 后台标签页定时器被降频, 故在
- *   pageshow/visibilitychange/focus 时立即补刷, 避免回前台第一请求带旧值。
- *   sid 优先续用 cookie 里现有的, 没有则生成并存 localStorage。
  *
  * 部署:
- *   1. 修改全局 app.js, 在文件最顶部加:
- *        document.write('<script src="/rfw.js"></script>');  或
- *        (function(){var s=document.createElement('script');s.src='/rfw.js';document.head.appendChild(s)})();
- *   2. 同源 iframe 由 nginx sub_filter 注入 <script src="/rfw.js"></script>
- *   3. SECRET 必须与 config.lua 的 secret 一致; 泄露后需更换并同步改两边
- *   4. 服务器升级到"运动 Token"机制前先让本文件全量缓存生效(cookie_ts_max=0 可临时过渡)
+ *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
+ *     <script src="/cgi-rfw/rfw.min.js?v=4.3.0"></script>
+ *
+ *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
 (function () {
-  if (window.__RFW__) return;
-  window.__RFW__ = { loaded: true };
+  // 仅作为诊断标记，不用它决定是否安装拦截器；攻击者预置/篡改
+  // window.__RFW__ 不能阻止本次脚本继续安装 Header Gate 客户端逻辑。
+  try {
+    Object.defineProperty(window, "__RFW__", {
+      value: Object.freeze({ loaded: true, version: "4.3.0" }),
+      writable: false, configurable: false, enumerable: false
+    });
+  } catch (e) {}
 
-  var SECRET = "N9x_Ant1_r3p14y!"; // 与 config.lua secret 一致
-  // 单头融合: RFWDATA = ts.nonce.sign(与 nginx ma_rfw.lua 一致)
   var H_DATA = "RFWDATA";
-
   var enc = new TextEncoder();
   var counter = 0;
-
-  // crypto.subtle 只在 HTTPS 安全上下文存在; 否则用纯 JS SHA-256/HMAC 回退,
-  // 保证签名与 cookie 刷新在任何部署(http 内网/本地联调)都能跑, 与服务器一致。
   var useSubtle = !!(window.crypto && window.crypto.subtle);
   if (window.console) {
     console.log("[rfw.js] loaded, crypto.subtle=" + useSubtle +
       (useSubtle ? "" : " (使用纯 JS HMAC 回退)"));
   }
 
-  // ---- 纯 JS SHA-256 / HMAC-SHA256 ----
+  // ============================================================
+  // 纯 JS SHA-256 / HMAC-SHA256 (crypto.subtle 不可用时回退)
+  // ============================================================
   var K256 = [
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -57,7 +53,7 @@
   ];
   var H256 = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
   function rotr256(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
-  function sha256(msg) { // msg: Uint8Array → Uint8Array(32)
+  function sha256(msg) {
     var ml = msg.length;
     var m = new Uint8Array((ml + 9 + 63) & ~63);
     m.set(msg);
@@ -95,7 +91,7 @@
     }
     return out;
   }
-  function hmacSha256(key, msg) { // 均 Uint8Array → Uint8Array(32)
+  function hmacSha256(key, msg) {
     if (key.length > 64) key = sha256(key);
     var ipad = new Uint8Array(64), opad = new Uint8Array(64);
     for (var i = 0; i < 64; i++) {
@@ -117,24 +113,23 @@
     return out;
   }
 
-  var keyP = useSubtle ?
-    crypto.subtle.importKey("raw", enc.encode(SECRET),
-      { name: "HMAC", hash: "SHA-256" }, false, ["sign"]) : null;
-
-  function hmacHex(data) {
-    if (useSubtle) {
-      return keyP.then(function (k) {
-        return crypto.subtle.sign("HMAC", k, enc.encode(data));
-      }).then(hex);
-    }
-    return Promise.resolve(hex(hmacSha256(enc.encode(SECRET), enc.encode(data))));
-  }
-
   function sha256Hex(buf) {
     if (useSubtle) {
       return crypto.subtle.digest("SHA-256", buf).then(hex);
     }
     return Promise.resolve(hex(sha256(new Uint8Array(buf))));
+  }
+
+  // 同步 XHR 不能等待 crypto.subtle Promise，因此使用同一套纯 JS
+  // SHA-256/HMAC 实现同步生成 RFWDATA。仅用于少量同步请求。
+  function makeSignSync(secretStr, method, url, bodyBuf, clockOffset) {
+    var ts = Math.floor(Date.now() / 1000) + (clockOffset || 0);
+    var nonce = newNonce();
+    var b = bodyBuf || new ArrayBuffer(0);
+    var bh = hex(sha256(new Uint8Array(b)));
+    var data = method + "|" + pathQuery(url) + "|" + bh + "|" + ts + "|" + nonce;
+    var sig = hex(hmacSha256(enc.encode(secretStr), enc.encode(data)));
+    return { ts: String(ts), nonce: nonce, sign: sig };
   }
 
   function newNonce() {
@@ -143,8 +138,6 @@
       Math.random().toString(36).slice(2, 10);
   }
 
-  // 统一成 nginx request_uri 形式: 与浏览器同款解析(相对地址按 document.baseURI 解析,
-  // 它不含 #fragment, 也覆盖 <base> 标签), 保证签名串 == 浏览器实际请求行
   function pathQuery(url) {
     try {
       var base = (typeof document !== "undefined" && document.baseURI) || location.href;
@@ -157,7 +150,7 @@
 
   function isSameOrigin(url) {
     var m = /^[a-z][a-z0-9+.-]*:\/\/([^/]+)/i.exec(url);
-    if (!m) return true; // 相对地址 = 同源
+    if (!m) return true;
     try {
       var host = m[1];
       return host === location.host || host === location.hostname ||
@@ -165,165 +158,345 @@
     } catch (e) { return false; }
   }
 
-  // 签名并返回头
-  function sign(method, url, bodyBuf) {
-    var ts = Math.floor(Date.now() / 1000);
+  // ============================================================
+  // 通用: HMAC with key (Uint8Array key → Promise<hex>)
+  // ============================================================
+  function hmacHexWith(keyBytes, data) {
+    if (useSubtle) {
+      return crypto.subtle.importKey("raw", keyBytes,
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+        .then(function (k) {
+          return crypto.subtle.sign("HMAC", k, enc.encode(data));
+        }).then(hex);
+    }
+    return Promise.resolve(hex(hmacSha256(keyBytes, enc.encode(data))));
+  }
+
+  // ============================================================
+  // 签名方法: method + url + bodyBuf → { ts, nonce, sign }
+  // ============================================================
+  function makeSign(secretStr, method, url, bodyBuf, clockOffset) {
+    var ts = Math.floor(Date.now() / 1000) + (clockOffset || 0);
     var nonce = newNonce();
     var b = bodyBuf || new ArrayBuffer(0);
+    var keyBytes = enc.encode(secretStr);
     return sha256Hex(b).then(function (bh) {
       var data = method + "|" + pathQuery(url) + "|" + bh + "|" + ts + "|" + nonce;
-      return hmacHex(data).then(function (sig) {
+      return hmacHexWith(keyBytes, data).then(function (sig) {
         return { ts: String(ts), nonce: nonce, sign: sig };
       });
     });
   }
 
-  // ---- fetch 包装 ----
-  if (typeof window.fetch === "function") {
-    var _fetch = window.fetch;
-    window.fetch = function (input, init) {
-      init = init || {};
-      var method = String(init.method || (input && input.method) || "GET").toUpperCase();
-      var url = typeof input === "string" ? input : input.url;
+  // ============================================================
+  // 拦截器安装: fetch + XMLHttpRequest
+  //   getPendingPromise() 返回一个 Promise, 在密钥就绪时 resolve
+  //   getSecret() → 当前密钥字符串
+  //   getClockOffset() → 时钟偏移
+  //   isReady() → 密钥是否就绪(ready=true 后才放行请求)
+  // ============================================================
+  function installInterceptors(getPendingPromise, getSecret, getClockOffset, isReady) {
+    // ---- fetch ----
+    if (typeof window.fetch === "function") {
+      var _fetch = window.fetch;
+      window.fetch = function (input, init) {
+        init = init || {};
+        var method = String(init.method || (input && input.method) || "GET").toUpperCase();
+        var url = typeof input === "string" ? input : input.url;
 
-      var bodyBuf = null;
-      var p;
-      var hasBody = (init.body != null) || (input && input.body != null);
-      if (!hasBody) {
-        p = Promise.resolve(new ArrayBuffer(0));
-      } else if (typeof init.body === "string") {
-        bodyBuf = enc.encode(init.body).buffer;
-        p = Promise.resolve(bodyBuf);
-      } else if (init.body instanceof ArrayBuffer || (typeof ArrayBuffer !== "undefined" &&
-        ArrayBuffer.isView(init.body))) {
-        bodyBuf = init.body.buffer;
-        p = Promise.resolve(bodyBuf);
-      } else if (typeof input === "object" && input && typeof input.clone === "function" &&
-        input.body) {
-        // input 是带 body 的 Request → clone 读取, 原 request 不被消费
-        p = input.clone().arrayBuffer().then(function (b) { bodyBuf = b; });
-      } else if (init.body != null) {
-        // Blob / FormData / URLSearchParams 等: 读副本算哈希, 原 body 照发
-        p = new Response(init.body).arrayBuffer().then(function (b) { bodyBuf = b; });
-      } else {
-        p = Promise.resolve(new ArrayBuffer(0));
-      }
+        if (!isSameOrigin(url)) return _fetch.apply(this, arguments);
 
-      if (!isSameOrigin(url)) return _fetch.apply(this, arguments);
+        var bodyBuf = null;
+        var p;
+        var hasBody = (init.body != null) || (input && input.body != null);
+        if (!hasBody) {
+          p = Promise.resolve(new ArrayBuffer(0));
+        } else if (typeof init.body === "string") {
+          bodyBuf = enc.encode(init.body).buffer;
+          p = Promise.resolve(bodyBuf);
+        } else if (init.body instanceof ArrayBuffer || (typeof ArrayBuffer !== "undefined" &&
+          ArrayBuffer.isView(init.body))) {
+          bodyBuf = init.body.buffer;
+          p = Promise.resolve(bodyBuf);
+        } else if (typeof input === "object" && input && typeof input.clone === "function" &&
+          input.body) {
+          p = input.clone().arrayBuffer().then(function (b) { bodyBuf = b; });
+        } else if (init.body != null) {
+          p = new Response(init.body).arrayBuffer().then(function (b) { bodyBuf = b; });
+        } else {
+          p = Promise.resolve(new ArrayBuffer(0));
+        }
 
-      return p.then(function () {
-        return sign(method, url, bodyBuf);
-      }).then(function (r) {
-        var h = new Headers(init.headers);
-        h.set(H_DATA, r.ts + "." + r.nonce + "." + r.sign);
-        init.method = method;
-        init.headers = h;
-        return _fetch.call(this, input, init);
-      }).catch(function () {
-        return _fetch.apply(this, arguments); // 出错时降级为原样发送
-      });
-    };
+        var self = this;
+        return p.then(function () {
+          if (!isReady()) return getPendingPromise();
+          return null;
+        }).then(function () {
+          var secret = getSecret();
+          if (!secret) return _fetch.call(self, input, init);
+          return makeSign(secret, method, url, bodyBuf, getClockOffset()).then(function (r) {
+            var h = new Headers(init.headers);
+            h.set(H_DATA, r.ts + "." + r.nonce + "." + r.sign);
+            init.method = method;
+            init.headers = h;
+            return _fetch.call(self, input, init);
+          });
+        }).catch(function () {
+          return _fetch.call(self, input, init);
+        });
+      };
+    }
+
+    // ---- XMLHttpRequest ----
+    if (typeof XMLHttpRequest !== "undefined") {
+      var _open = XMLHttpRequest.prototype.open;
+      var _send = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (method, url, async, user, pass) {
+        this._rfwMeta = { method: String(method || "GET").toUpperCase(), url: url };
+        this._rfwAsync = (async !== false);
+        return _open.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function (body) {
+        var x = this;
+        var meta = x._rfwMeta || { method: "GET", url: "" };
+        if (meta.url && !isSameOrigin(meta.url)) return _send.apply(this, arguments);
+        if (x._rfwAsync === false) {
+          // 同步 XHR 不能等待异步 crypto.subtle，但 GET/字符串/二进制
+          // 请求体可以用纯 JS 同步 HMAC 生成 RFWDATA。若 dynamic key
+          // 尚未就绪或 body 类型无法同步序列化，则原样发送，由服务端
+          // 对已有合法 _RFW 执行 Cookie fallback；无凭证仍拒绝。
+          try {
+            var syncSecret = getSecret();
+            if (syncSecret && isReady()) {
+              var syncBuf;
+              if (body == null) {
+                syncBuf = new ArrayBuffer(0);
+              } else if (typeof body === "string") {
+                syncBuf = enc.encode(body).buffer;
+              } else if (body instanceof ArrayBuffer) {
+                syncBuf = body;
+              } else if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(body)) {
+                syncBuf = body.buffer;
+              } else {
+                syncBuf = null;
+              }
+              if (syncBuf !== null) {
+                var syncSign = makeSignSync(syncSecret, meta.method, meta.url, syncBuf, getClockOffset());
+                x.setRequestHeader(H_DATA, syncSign.ts + "." + syncSign.nonce + "." + syncSign.sign);
+              }
+            }
+          } catch (e) {}
+          return _send.apply(this, arguments);
+        }
+
+        var p;
+        if (body == null) {
+          p = Promise.resolve(new ArrayBuffer(0));
+        } else if (typeof body === "string") {
+          p = Promise.resolve(enc.encode(body).buffer);
+        } else if (body instanceof ArrayBuffer || (typeof ArrayBuffer !== "undefined" &&
+          ArrayBuffer.isView(body))) {
+          p = Promise.resolve(body.buffer);
+        } else {
+          p = new Response(body).arrayBuffer();
+        }
+
+        p.then(function (buf) {
+          if (!isReady()) {
+            return getPendingPromise().then(function () { return buf; });
+          }
+          return buf;
+        }).then(function (buf) {
+          var secret = getSecret();
+          if (!secret) { _send.call(x, body); return; }
+          return makeSign(secret, meta.method, meta.url, buf, getClockOffset()).then(function (r) {
+            try { x.setRequestHeader(H_DATA, r.ts + "." + r.nonce + "." + r.sign); } catch (e) {}
+            _send.call(x, body);
+          });
+        }).catch(function () {
+          _send.call(x, body);
+        });
+      };
+    }
   }
 
-  // ---- XMLHttpRequest 包装 ----
-  if (typeof XMLHttpRequest !== "undefined") {
-    var _open = XMLHttpRequest.prototype.open;
-    var _send = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (method, url, async, user, pass) {
-      this._rfwMeta = { method: String(method || "GET").toUpperCase(), url: url };
-      this._rfwAsync = (async !== false);
-      return _open.apply(this, arguments);
-    };
-    XMLHttpRequest.prototype.send = function (body) {
-      var x = this;
-      var meta = x._rfwMeta || { method: "GET", url: "" };
-      if (meta.url && !isSameOrigin(meta.url)) return _send.apply(this, arguments);
-      if (x._rfwAsync === false) return _send.apply(this, arguments); // 同步 XHR 跳过
+  // ============================================================
+  // 模式分支
+  // ============================================================
+  // 灰度发布固定 dynamic-only；不读取 window.__RFW_MODE__ 或
+  // window.__RFW_TOKEN__。这些全局变量均不属于安全信任边界。
+  // ==========================================================
+  // 动态模式: 从 /cgi-rfw/token 获取短期密钥
+  // ==========================================================
+  var dynKey       = null;   // 当前密钥字符串
+  var dynClockOff  = 0;      // 服务端时间偏移
+  var dynExpiresAt = 0;      // 密钥到期时间戳(ms)
+  var dynReady     = false;  // 是否已获取过密钥(含 null)
+  var dynNoKey     = false;  // 当前是否处于无密钥退避状态
+  var pendingQueue = [];     // 密钥获取期间排队的请求 resolve 函数
+  var retryTimer   = null;
+  var tokenInFlight = null;
+  // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
+  // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
+  var rawFetch = window.fetch;
 
-      var p;
-      if (body == null) {
-        p = Promise.resolve(new ArrayBuffer(0));
-      } else if (typeof body === "string") {
-        p = Promise.resolve(enc.encode(body).buffer);
-      } else if (body instanceof ArrayBuffer || (typeof ArrayBuffer !== "undefined" &&
-        ArrayBuffer.isView(body))) {
-        p = Promise.resolve(body.buffer);
-      } else {
-        p = new Response(body).arrayBuffer();
-      }
-
-      p.then(function (buf) {
-        return sign(meta.method, meta.url, buf);
-      }).then(function (r) {
-        try { x.setRequestHeader(H_DATA, r.ts + "." + r.nonce + "." + r.sign); } catch (e) {}
-        _send.call(x, body);
-      }).catch(function () {
-        _send.call(x, body); // 出错时降级为原样发送
-      });
-    };
-  }
-
-  // ---- _RFW 运动 Token(cookie 自刷新) ----
-  // 值格式 _RFW = <sig>.<sid>.<seq>.<ts_ms>(与 nginx ma_rfw.lua cookie_sig2 一致)
-  var C_NAME = "_RFW";
-  var tokenBusy = false; // 防止异步重签交叉(异步 HMAC)
-  var tokenSeq = 0;      // 本页内存兜底(读到不 cookie 时也单调)
-  var tokenSid = null;
-  var tokenLogged = false;
+  var DYN_COOKIE_NAME = "_RFW";
+  var DYN_COOKIE_TTL = 86400;
+  var DYN_COOKIE_TAG_HEX = 32;
+  var DYN_COOKIE_REFRESH_MS = 30000;
+  var dynCookieTimer = null;
+  var dynCookieSeq = 0;
 
   function getCookie(name) {
-    var m = new RegExp("(?:^|;\\s*)" + name + "=([^;]*)").exec(document.cookie);
+    var m = new RegExp("(?:^|;\\s*)" + name + "=([^;]*)").exec(document.cookie || "");
     return m ? m[1] : null;
   }
 
-  function parseRfw(v) {
-    var m = /^([0-9a-f]{16})\.([\w-]+)\.(\d+)\.(\d+)$/i.exec(v || "");
-    return m ? { sid: m[2], seq: parseInt(m[3], 10), ts: m[4] } : null;
+  function parseDynamicCookie(v) {
+    var m = new RegExp("^([0-9a-f]{" + DYN_COOKIE_TAG_HEX + "})\\.([\\w-]+)\\.(\\d+)\\.(\\d+)$", "i").exec(v || "");
+    return m ? { sid: m[2], seq: parseInt(m[3], 10), ts: parseInt(m[4], 10) } : null;
   }
 
-  function refreshToken() {
-    if (tokenBusy) return;
-    tokenBusy = true;
-    // 任何同步异常都不能把 tokenBusy 钉死(否则 timer 永久空转 → cookie 不刷新)
+  function refreshDynamicCookie(force) {
+    if (!dynKey || typeof document === "undefined") return;
     try {
-      var prev = parseRfw(getCookie(C_NAME));
-      var sid = (prev && prev.sid) || tokenSid;
+      var prev = parseDynamicCookie(getCookie(DYN_COOKIE_NAME));
+      var now = Date.now();
+      if (!force && prev && (now - prev.ts) < DYN_COOKIE_REFRESH_MS) return;
+      var sid = (prev && prev.sid) || "";
       if (!sid) {
         try { sid = localStorage.getItem("rfw_sid") || ""; } catch (e) { sid = ""; }
       }
       if (!sid) {
-        sid = "j" + Math.random().toString(36).slice(2, 12) + "-" + Date.now().toString(36);
+        sid = "j" + Math.random().toString(36).slice(2, 12) + "-" + now.toString(36);
         try { localStorage.setItem("rfw_sid", sid); } catch (e) {}
       }
-      tokenSid = sid;
-      // 读后自增: 续用 jar 里的最大序号(多标签页共享 cookie 也不回退)
-      var seq = Math.max(prev ? prev.seq : 0, tokenSeq) + 1;
-      tokenSeq = seq;
-      var ts = Date.now(); // 毫秒
-      var data = "RFW:" + sid + "," + seq + "," + ts;
-      hmacHex(data).then(function (sig) {
-        var v = sig.slice(0, 16) + "." + sid + "." + seq + "." + ts;
-        // 同 name + Path=/ + SameSite=Lax 覆盖服务器 bootstrap 值(非 HttpOnly 可读)。
-        // 注意: 若 jar 里还留着旧服务器下的 HttpOnly _RFW, JS 无法覆盖它, 会写成一个
-        // 同名新值; 服务器取"最后一个"匹配值 + stale 时下发 bootstrap 驱逐, 会自愈。
-        document.cookie = C_NAME + "=" + v + "; Path=/; SameSite=Lax; Max-Age=86400";
-        if (!tokenLogged) {
-          tokenLogged = true;
-          if (window.console) console.log("[rfw.js] cookie token 刷新已启动", v);
-        }
-        tokenBusy = false;
-      }).catch(function () { tokenBusy = false; });
-    } catch (e) {
-      tokenBusy = false;
+      var seq = Math.max(prev ? prev.seq : 0, dynCookieSeq) + 1;
+      dynCookieSeq = seq;
+      // token 接口返回 server_time 后，使用服务端时钟签发 Cookie ts。
+      var ts = now + dynClockOff * 1000;
+      hmacHexWith(enc.encode(dynKey), "RFW:" + sid + "," + seq + "," + ts).then(function (sig) {
+        document.cookie = DYN_COOKIE_NAME + "=" + sig.slice(0, DYN_COOKIE_TAG_HEX) + "." + sid + "." + seq + "." + ts +
+          "; Path=/; SameSite=Lax; Max-Age=" + DYN_COOKIE_TTL;
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  function startDynamicCookieRefresh() {
+    if (typeof document === "undefined") return;
+    refreshDynamicCookie(true);
+    if (!dynCookieTimer) {
+      dynCookieTimer = setInterval(function () { refreshDynamicCookie(false); }, DYN_COOKIE_REFRESH_MS);
     }
   }
 
-  if (typeof document !== "undefined") {
-    refreshToken();
-    setInterval(refreshToken, 200);
-    // 后台标签页定时器被降频到 ~1/min → 回前台/回页面立即补刷一次
-    ["pageshow", "visibilitychange", "focus"].forEach(function (ev) {
-      window.addEventListener(ev, refreshToken, false);
-    });
+  function flushQueue() {
+    var q = pendingQueue;
+    pendingQueue = [];
+    for (var i = 0; i < q.length; i++) {
+      try { q[i](); } catch (e) {}
+    }
   }
+
+  function enterNoKeyMode() {
+    dynNoKey  = true;
+    dynKey    = null;
+    dynReady  = true;
+    flushQueue();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      dynNoKey = false;
+      dynReady = false;
+      fetchAndApplyToken();
+    }, 5 * 60 * 1000);
+    if (window.console) console.log("[rfw.js] 进入无签名模式, 5 分钟后重试");
+  }
+
+  function fetchAndApplyToken() {
+    if (tokenInFlight) return tokenInFlight;
+    tokenInFlight = rawFetch("/cgi-rfw/token?t=" + Date.now(), {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store"
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (data) {
+      if (data.key) {
+        dynKey       = data.key;
+        var expiresIn = data.expires_in || 1800;
+        dynExpiresAt = Date.now() + expiresIn * 1000;
+        dynClockOff  = (data.server_time || Math.floor(Date.now() / 1000)) - Math.floor(Date.now() / 1000);
+        dynNoKey     = false;
+        dynReady     = true;
+        DYN_COOKIE_TTL = data.cookie_ttl || DYN_COOKIE_TTL;
+        DYN_COOKIE_TAG_HEX = Math.max(16, Math.min(64, data.cookie_tag_hex || DYN_COOKIE_TAG_HEX));
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        startDynamicCookieRefresh();
+        flushQueue();
+        var advance = Math.max((expiresIn - 30) * 1000, 5000);
+        setTimeout(fetchAndApplyToken, advance);
+        if (window.console) console.log("[rfw.js] token 获取成功, expires_in=" + expiresIn + "s, clock_offset=" + dynClockOff + "s");
+      } else {
+        enterNoKeyMode();
+      }
+    }).catch(function (e) {
+      if (window.console) console.log("[rfw.js] token 获取失败:", e.message || e);
+      enterNoKeyMode();
+    }).then(function () {
+      tokenInFlight = null;
+    });
+    return tokenInFlight;
+  }
+
+  installInterceptors(
+    function () {
+      return new Promise(function (resolve) {
+        var resolved = false;
+        var timer = setTimeout(function () {
+          if (resolved) return;
+          resolved = true;
+          if (window.console) console.warn("[rfw.js] 密钥获取超时(5s), 降级为无签名模式");
+          if (!dynReady) {
+            dynNoKey = true;
+            dynKey   = null;
+            dynReady = true;
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(function () {
+              retryTimer = null;
+              dynNoKey = false;
+              dynReady = false;
+              fetchAndApplyToken();
+            }, 5 * 60 * 1000);
+          }
+          resolve();
+        }, 5000);
+        pendingQueue.push(function () {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    },
+    function () { return dynNoKey ? null : dynKey; },
+    function () { return dynClockOff; },
+    function () { return dynReady; }
+  );
+
+  // 自动恢复: 页面可见/focus 时重新取 token
+  ["pageshow", "visibilitychange", "focus"].forEach(function (ev) {
+    window.addEventListener(ev, function () {
+      if (!dynKey || Date.now() > dynExpiresAt - 30000) {
+        dynReady = false;
+        dynNoKey = false;
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        fetchAndApplyToken();
+      }
+    }, false);
+  });
+
+  // 启动
+  fetchAndApplyToken();
 })();

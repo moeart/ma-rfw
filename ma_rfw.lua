@@ -1,14 +1,14 @@
 -- MA-RFW (MoeArt Replay Firewall / 萌艺科技重放攻击防火墙)
 -- 开发组织: 萌艺科技 MASEC 项目组 (MoeArt Inc, MA-SEC Team)
 --
--- 基于请求签名的重放攻击防护模块(签名模式 + 行为兜底)。
+-- 基于请求签名的 dynamic-only 重放攻击防护模块。
 -- 存储后端: ngx.shared.DICT (nginx 共享内存, 零网络开销, 零外部依赖)
 -- nginx.conf 必须声明: lua_shared_dict rfw 64m;
 --
--- 规则(优先签名校验, 无签名走行为兜底):
+-- 规则(默认 RFWDATA-only):
 --   1. 请求带 RFWDATA → 严格校验: ts 时效 → nonce 一次性 → body 哈希 → HMAC 签名
---   2. 无签名请求 → 按 IP 统计签名比例, 低于阈值 → 拦截
---   3. 签名比例内的无签名请求 → 行为兜底: cookie 校验 + 重放检测
+--   2. 受保护请求缺少 RFWDATA → 直接拒绝；仅显式配置兼容例外时才进入 dynamic Cookie 校验
+--   3. 文档 bootstrap 只由精确文档路径或 Nginx 显式变量控制
 local core = _G.ma_rfw_core
 if core then
     core.check()
@@ -33,6 +33,28 @@ do
     end
     config.html_file = plugin_dir .. "/blocked.html"
 end
+
+local KEY_MODE = "dynamic"
+if config.key_mode ~= nil and config.key_mode ~= "dynamic" then
+    error("ma_rfw: this gray-release build only supports key_mode=dynamic")
+end
+-- 灰度高安全策略：不再兼容 static 密钥、旧 secret RFWDATA 或旧 Cookie。
+local DYN_STRICT_SIGN = true
+-- Cookie 不是 dynamic Header 的替代品；只有显式开启时才允许少量特殊请求兜底。
+local DYN_ALLOW_COOKIE_FALLBACK = config.dynamic_allow_cookie_fallback == true
+local STRICT_API_PATHS  = type(config.strict_api_paths) == "table" and config.strict_api_paths or {}
+local DYNAMIC_DOCUMENT_PATHS = type(config.dynamic_document_paths) == "table" and config.dynamic_document_paths or {}
+local DYN_COOKIE_TAG_HEX = math.max(16, math.min(64, tonumber(config.dynamic_cookie_tag_hex) or 32))
+local COOKIE_TAG_HEX = DYN_COOKIE_TAG_HEX
+local KEY_TTL          = config.key_ttl or 1800
+local KEY_GRACE        = config.key_grace or 90
+local KEY_ADVANCE      = config.key_advance_refresh or 30
+local KEY_BIND_IP      = config.key_bind_ip ~= false
+local KEY_BIND_UA      = config.key_bind_ua ~= false
+local KEY_FETCH_QUOTA  = config.key_fetch_quota or 1000
+local KEY_QUOTA_WINDOW = config.key_quota_window or 86400
+local TOKEN_RATE_LIMIT = config.token_rate_limit or 10
+local TOKEN_RATE_WINDOW= config.token_rate_window or 60
 
 local LOG_DIR = plugin_dir .. "/logs"
 
@@ -117,33 +139,48 @@ local worker_pid = (type(ngx.worker) == "table" and type(ngx.worker.pid) == "fun
     and ngx.worker.pid() or 0
 
 -- HMAC 签名: 优先 resty.openssl.hmac(FFI), 回退 sha256.lua 纯 Lua
-local sign
+local sign_with_key
 do
     local ok, mod = pcall(require, "resty.openssl.hmac")
     if ok then
-        local secret = config.secret
-        sign = function(msg)
+        sign_with_key = function(secret, msg)
             local m = mod.new(secret, "sha256")
             m:update(msg)
             return m:final("hex")
         end
     else
-        sign = sha.hmac_prepare(config.secret)
+        sign_with_key = function(secret, msg)
+            return sha.hmac_prepare(secret)(msg)
+        end
     end
 end
-
-local COOKIE_NAME = config.cookie_name
-local COOKIE_TTL  = config.cookie_ttl
-
-local function cookie_sig(ts, nonce)
-    return sign("RFW:" .. ts .. "," .. nonce):sub(1, 16)
+-- ===== 动态密钥工具函数 =====
+local function ua_hash_fn(ua)
+    return sha.hex(ua or ""):sub(1, 16)
 end
 
-local nonce_counter = 0
-local function new_nonce()
-    nonce_counter = nonce_counter + 1
-    local t = math.floor(ngx_now() * 1000)
-    return tostring(t) .. "-" .. tostring(worker_pid) .. "-" .. tostring(nonce_counter)
+local function base64url_encode(data)
+    return ngx.encode_base64(data):gsub("+", "-"):gsub("/", "_"):gsub("=", "")
+end
+
+local function generate_random_bytes(n)
+    local ok, resty_random = pcall(require, "resty.random")
+    if ok then return resty_random.bytes(n) end
+    local f = io.open("/dev/urandom", "rb")
+    if f then
+        local data = f:read(n)
+        f:close()
+        if data and #data == n then return data end
+    end
+    local t = {}
+    for i = 1, n do t[i] = string.char(math.random(0, 255)) end
+    return table.concat(t)
+end
+
+local function generate_key_pair()
+    local key    = base64url_encode(generate_random_bytes(32))
+    local key_id = base64url_encode(generate_random_bytes(8))
+    return key, key_id
 end
 
 -- ===== 存储后端: ngx.shared.DICT =====
@@ -160,6 +197,90 @@ end
 local function key_for(kind, name)
     return MKEY_PREFIX .. kind .. ":" .. name
 end
+
+local KEY_RECORD_PREFIX = MKEY_PREFIX .. "key:"
+local QUOTA_PREFIX      = MKEY_PREFIX .. "tokencnt:"
+local FREQ_PREFIX       = MKEY_PREFIX .. "tokenfreq:"
+
+local function key_record_store_key(ip, ua_h)
+    return KEY_RECORD_PREFIX .. ip .. ":" .. ua_h
+end
+
+local function get_key_record(ip, ua_h)
+    if not store then return nil end
+    local v = store:get(key_record_store_key(ip, ua_h))
+    if not v then return nil end
+    local ok, record = pcall(cjson.decode, v)
+    if not ok or type(record) ~= "table" then return nil end
+    local now = ngx_time()
+    if record.current and record.current.expire and record.current.expire < now then
+        if record.grace and record.grace.expire and record.grace.expire >= now then
+            record.current = record.grace
+        else
+            record.current = nil
+        end
+        record.grace = nil
+    end
+    if record.grace and record.grace.expire and record.grace.expire < now then
+        record.grace = nil
+    end
+    if not record.current and not record.grace then return nil end
+    return record
+end
+
+local function store_key_record(ip, ua_h, record)
+    if not store then return end
+    store:set(key_record_store_key(ip, ua_h), cjson.encode(record), KEY_TTL + KEY_GRACE + 60)
+end
+
+local function rotate_key(ip, ua_h)
+    local now    = ngx_time()
+    local record = get_key_record(ip, ua_h)
+    if record and record.current and record.current.expire then
+        local remaining = record.current.expire - now
+        if remaining > KEY_ADVANCE then
+            return record.current.key, record.current.expire, false
+        end
+    end
+    local quota_key = QUOTA_PREFIX .. ip .. ":" .. ua_h
+    store:add(quota_key, 0, KEY_QUOTA_WINDOW)
+    local quota_count = store:incr(quota_key, 1, 0)
+    if quota_count > KEY_FETCH_QUOTA then
+        if record and record.current and record.current.expire and record.current.expire >= now then
+            return record.current.key, record.current.expire, true
+        end
+        return nil, 0, true
+    end
+    local key, key_id = generate_key_pair()
+    local new_expire  = now + KEY_TTL
+    local new_record  = {}
+    if record and record.current and record.current.expire and record.current.expire >= now then
+        new_record.grace = record.current
+    end
+    new_record.current = { key = key, expire = new_expire, key_id = key_id }
+    store_key_record(ip, ua_h, new_record)
+    return key, new_expire, false
+end
+
+local function check_token_rate(ip, ua_h)
+    if not store then return false end
+    local rate_key = FREQ_PREFIX .. ip .. ":" .. ua_h
+    store:add(rate_key, 0, TOKEN_RATE_WINDOW)
+    local count = store:incr(rate_key, 1, 0)
+    return count > TOKEN_RATE_LIMIT
+end
+
+local COOKIE_NAME = config.cookie_name or "_RFW"
+local COOKIE_TTL  = config.cookie_ttl or 86400
+
+local nonce_counter = 0
+local function new_nonce()
+    nonce_counter = nonce_counter + 1
+    local t = math.floor(ngx_now() * 1000)
+    return tostring(t) .. "-" .. tostring(worker_pid) .. "-" .. tostring(nonce_counter)
+end
+
+
 
 -- ===== 统计计数: 使用 shared dict 实现跨 worker 聚合 =====
 local STATS_PREFIX = MKEY_PREFIX .. "stats:"
@@ -325,6 +446,58 @@ local REPLAY_RELINK_SEC = config.replay_relink_sec or 2
 local SEQ_SLACK = config.seq_slack or 10
 local SEQ_TTL = config.seq_ttl or COOKIE_TTL
 local SEQ_CACHE_TTL = config.seq_cache_ttl or 3
+
+-- 动态 WebApp 通常会并发发起多个幂等 GET。对这些方法仍要求
+-- Cookie HMAC 正确，但不把同一个合法 Cookie 的并行复用当成重放。
+-- 状态改变请求(POST/PUT/PATCH/DELETE)继续走严格序号/重放策略。
+local COOKIE_SAFE_METHODS = {}
+for _, method in ipairs(config.cookie_safe_methods or {"GET", "HEAD", "OPTIONS"}) do
+    COOKIE_SAFE_METHODS[tostring(method):upper()] = true
+end
+local COOKIE_REBOOTSTRAP_DOCUMENT = config.cookie_rebootstrap_document ~= false
+-- Firefox、urllib、旧代理可能不发送 Sec-Fetch-Dest；默认兼容文档 bootstrap。
+-- API 仍由 dynamic_header_required() 严格拦截。设为 true 可启用更严格的 Fetch Metadata 要求。
+local COOKIE_DOCUMENT_REQUIRE_FETCH = config.cookie_document_require_fetch_metadata == true
+local function cookie_safe_method(method)
+    return KEY_MODE == "dynamic" and COOKIE_SAFE_METHODS[tostring(method or "GET"):upper()] == true
+end
+local function cookie_document_request(method)
+    if KEY_MODE ~= "dynamic" or not COOKIE_REBOOTSTRAP_DOCUMENT then return false end
+    method = tostring(method or "GET"):upper()
+    if method ~= "GET" and method ~= "HEAD" then return false end
+    local uri = ngx_var.uri or ""
+    local allowed_path = ngx_var.rfw_document == "1"
+    for _, path in ipairs(DYNAMIC_DOCUMENT_PATHS) do
+        path = tostring(path or "")
+        if path ~= "" and uri == path then allowed_path = true; break end
+    end
+    if not allowed_path then return false end
+    if COOKIE_DOCUMENT_REQUIRE_FETCH then
+        return tostring(ngx_var.http_sec_fetch_dest or ""):lower() == "document"
+    end
+    return true
+end
+
+local function dynamic_header_required()
+    if KEY_MODE ~= "dynamic" or not DYN_STRICT_SIGN then return false end
+    local method = tostring(ngx_req.get_method() or "GET"):upper()
+    if method == "OPTIONS" then return false end
+    local uri = ngx_var.uri or ""
+    for _, prefix in ipairs(STRICT_API_PATHS) do
+        prefix = tostring(prefix or "")
+        if prefix ~= "" and uri:sub(1, #prefix) == prefix then return true end
+    end
+    -- 常见 API/Controller 路径始终严格，不能被文档白名单或请求头伪造绕过。
+    if uri:match("^/api/") or uri:match("/api/") or
+       uri:match("^/graphql") or uri:match("^/v%d+/") or
+       uri:match("^/cgi%-bin/") or uri:match("%.do$") or
+       uri:match("Controller/") then
+        return true
+    end
+    if #STRICT_API_PATHS > 0 then return false end
+    -- 默认空列表表示除显式文档白名单外，所有非文档请求严格。
+    return not cookie_document_request(method)
+end
 
 local function load_html()
     if PENALTY_HTML then return end
@@ -617,15 +790,22 @@ local function write_seq(sid, ts, highest, last_seq, last_ts, last_first, count)
     store:set(key_for("seq", sid), v, SEQ_TTL + 10)
 end
 
-local function cookie_sig2(sid, seq, ts)
-    return sign("RFW:" .. sid .. "," .. seq .. "," .. ts):sub(1, 16)
+local function cookie_sig2(sid, seq, ts, key)
+    if not key or key == "" then return "" end
+    return sign_with_key(key, "RFW:" .. sid .. "," .. seq .. "," .. ts):sub(1, COOKIE_TAG_HEX)
 end
 
-local function set_cookie_value(sid, seq, ts)
-    local v = cookie_sig2(sid, tostring(seq), tostring(ts)) .. "." .. sid .. "." ..
+local function set_cookie_value(sid, seq, ts, key)
+    local v = cookie_sig2(sid, tostring(seq), tostring(ts), key) .. "." .. sid .. "." ..
         tostring(seq) .. "." .. tostring(ts)
-    ngx.header["Set-Cookie"] = COOKIE_NAME .. "=" .. v ..
+    local hdr = COOKIE_NAME .. "=" .. v ..
         "; Path=/; SameSite=Lax; Max-Age=" .. tostring(COOKIE_TTL)
+    ngx.ctx.rfw_pending_cookie = hdr
+    -- Dynamic 文档 Cookie 只在响应确认是 text/html 后发送；这不是
+    -- access 放行条件，只避免把 Cookie 发给被上游判成 JSON/错误页的响应。
+    local document_cookie = KEY_MODE == "dynamic" and cookie_document_request(ngx_req.get_method())
+    ngx.ctx.rfw_pending_cookie_document = document_cookie
+    if not document_cookie then ngx.header["Set-Cookie"] = hdr end
 end
 
 local function cookie_missing_track(ip)
@@ -652,11 +832,11 @@ local function cookie_missing_track(ip)
     return true
 end
 
-local function issue_cookie()
+local function issue_cookie(key)
     local sid = new_nonce()
     local ts = math.floor(ngx_now() * 1000)
     write_seq(sid, ts, 1)
-    set_cookie_value(sid, 1, ts)
+    set_cookie_value(sid, 1, ts, key)
     return sid, 1, ts
 end
 
@@ -713,8 +893,9 @@ local function signed_uri()
     return uri
 end
 
-local function check_nonce(ip, nonce, method, uri)
-    local key = key_for("nonce", nonce_key(ip, nonce))
+local function check_nonce(ip, nonce, method, uri, key_id)
+    local nk = key_id and (key_id .. "|" .. nonce) or nonce_key(ip, nonce)
+    local key = key_for("nonce", nk)
     local now = ngx_time()
     local ok, _ = store:add(key, tostring(now) .. "|" .. tostring(method) .. "|" .. tostring(uri), SIGN_WINDOW + 10)
     if ok then return true end
@@ -728,8 +909,8 @@ local function check_nonce(ip, nonce, method, uri)
     return false
 end
 
-local function track_sign_ratio(ip, has_signed)
-    local key = ip_key(ip)
+local function track_sign_ratio(ip, ua, has_signed)
+    local key = ip .. "|" .. (ua or "")
     local t = sign_ratio_track[key]
     if not t then
         if sign_ratio_entries >= RATIO_MAX_IP then
@@ -748,7 +929,8 @@ local function track_sign_ratio(ip, has_signed)
         local okc, tot = t.ok, t.total
         sign_ratio_track[key] = nil
         sign_ratio_entries = sign_ratio_entries - 1
-        if config.sign_ratio_fail then record_failure(ip, "sign-ratio-low") end
+        local ratio_fail = config.dynamic_sign_ratio_fail ~= false
+        if ratio_fail then record_failure(ip, "sign-ratio-low") end
         return true, okc, tot
     end
     return false
@@ -772,6 +954,7 @@ end
 local function verify_sign()
     local ip = ngx_var.remote_addr or ""
     local raw = ngx_var.http_rfwdata
+    local ua = ngx_var.http_user_agent or ""
     local d = DEBUG and {} or nil
     detail_add(d, "RFWDATA", raw or "")
     detail_add(d, "method", ngx_req.get_method())
@@ -798,47 +981,70 @@ local function verify_sign()
         return deny("sign-expired", d)
     end
 
-    local m = ngx_req.get_method()
+    local m   = ngx_req.get_method()
     local uri = signed_uri()
-
-    if not check_nonce(ip, nonce, m, uri) then
-        local v, _ = store:get(key_for("nonce", nonce_key(ip, nonce)))
-        local first_seen_ts, owner_m, owner_uri = 0, "", ""
-        if v then
-            first_seen_ts, owner_m, owner_uri = v:match("^([%d]+)|(.-)|(.*)$")
-            first_seen_ts = tonumber(first_seen_ts) or 0
-        end
-        detail_add(d, "first_seen_ts", tostring(first_seen_ts))
-        detail_add(d, "age_s", tostring(now - first_seen_ts))
-        detail_add(d, "owner_method", tostring(owner_m))
-        detail_add(d, "owner_uri", tostring(owner_uri))
-        record_failure(ip, "sign-replay")
-        return deny("sign-replay", d)
-    end
-
     local body = get_body()
-    local bh = sha.hex(body)
-    local expected = sign(m .. "|" .. uri .. "|" .. bh .. "|" .. t .. "|" .. nonce)
+    local bh   = sha.hex(body)
+    local signing_input = m .. "|" .. uri .. "|" .. bh .. "|" .. t .. "|" .. nonce
 
-    detail_add(d, "signing_uri", uri)
-    detail_add(d, "body_sha256", bh)
-    detail_add(d, "expected_hmac", expected)
-    detail_add(d, "actual_sig", sig)
+    -- ===== 动态模式: 多密钥验证链 =====
+    if KEY_MODE == "dynamic" then
+        local ua_h   = KEY_BIND_UA and ua_hash_fn(ua) or "default"
+        local bind_ip = KEY_BIND_IP and ip or "0.0.0.0"
+        local key_record = get_key_record(bind_ip, ua_h)
 
-    if not ct_eq(expected, sig) then
+        if not key_record then
+            rfw_debug("dynamic: no key record for " .. bind_ip .. " UA=" .. ua_h)
+            if dynamic_header_required() then
+                record_failure(ip, "dynamic-key-missing")
+                return deny("dynamic-key-missing", d)
+            end
+            return "treat_as_unsigned"
+        end
+
+        -- 尝试当前密钥验签
+        if key_record.current then
+            local expected = sign_with_key(key_record.current.key, signing_input)
+            detail_add(d, "expected_hmac", expected)
+            detail_add(d, "actual_sig", sig)
+            if ct_eq(expected, sig) and check_nonce(ip, nonce, m, uri, key_record.current.key_id) then
+                local r, okc, tot = track_sign_ratio(ip, ua, true)
+                if r then
+                    detail_add(d, "signed_in_window", tostring(okc))
+                    detail_add(d, "total_in_window", tostring(tot))
+                    return deny("sign-ratio-low", d)
+                end
+                incr_stat("signed_ok", 1)
+                rfw_debug("dynamic sign ok (current) method=" .. m .. " uri=" .. uri)
+                return nil
+            end
+        end
+
+        -- 尝试 grace 密钥验签
+        if key_record.grace then
+            local expected = sign_with_key(key_record.grace.key, signing_input)
+            if ct_eq(expected, sig) and check_nonce(ip, nonce, m, uri, key_record.grace.key_id) then
+                local r, okc, tot = track_sign_ratio(ip, ua, true)
+                if r then
+                    detail_add(d, "signed_in_window", tostring(okc))
+                    detail_add(d, "total_in_window", tostring(tot))
+                    return deny("sign-ratio-low", d)
+                end
+                incr_stat("signed_ok", 1)
+                rfw_debug("dynamic sign ok (grace) method=" .. m .. " uri=" .. uri)
+                return nil
+            end
+        end
+
+        -- 当前与 grace dynamic key 均验签失败；不接受旧 secret。
+        -- 验签全失败
         record_failure(ip, "sign-invalid")
         return deny("sign-invalid", d)
     end
 
-    local r, okc, tot = track_sign_ratio(ip, true)
-    if r then
-        detail_add(d, "signed_in_window", tostring(okc))
-        detail_add(d, "total_in_window", tostring(tot))
-        return deny("sign-ratio-low", d)
-    end
-    incr_stat("signed_ok", 1)
-    rfw_debug("sign ok method=" .. m .. " uri=" .. uri)
-    return nil
+    -- dynamic-only 不存在 static/secret 验签分支；验签全失败即拒绝。
+    record_failure(ip, "sign-invalid")
+    return deny("sign-invalid", d)
 end
 
 function _M.run()
@@ -867,8 +1073,6 @@ function _M.run()
 
     incr_stat("requests", 1)
 
-    if not config.secret then return deny("no-secret") end
-
     if not initialized then
         initialized = true
         init_shared_stats()
@@ -881,6 +1085,7 @@ function _M.run()
     end
 
     local ip = ngx_var.remote_addr or ""
+    local ua = ngx_var.http_user_agent or ""
     local blocked, buntil = is_blocked(ip)
     if blocked then
         incr_stat("blocked_hit", 1)
@@ -895,8 +1100,28 @@ function _M.run()
         return
     end
 
+    if KEY_MODE == "dynamic" and DYN_STRICT_SIGN and dynamic_header_required() and not SIGN_ENABLED then
+        record_failure(ip, "dynamic-sign-disabled")
+        return deny("dynamic-sign-disabled")
+    end
+    local headerless_cookie_fallback = false
+    if KEY_MODE == "dynamic" and DYN_STRICT_SIGN and dynamic_header_required() and not ngx_var.http_rfwdata then
+        -- Controller/.do/API 仍不能仅凭文档头、Accept 或 MIME 放行。
+        -- 但已有 dynamic _RFW Cookie 要继续进入下面的完整校验链，
+        -- 以兼容少量同步 XHR；无 Cookie 仍严格拒绝。
+        headerless_cookie_fallback = DYN_ALLOW_COOKIE_FALLBACK and get_cookie_value(COOKIE_NAME) ~= nil
+        if not headerless_cookie_fallback then
+            record_failure(ip, "dynamic-sign-missing")
+            return deny("dynamic-sign-missing")
+        end
+        rfw_debug("dynamic headerless Cookie fallback uri=" .. uri)
+    end
+
     if SIGN_ENABLED and ngx_var.http_rfwdata then
-        return verify_sign()
+        local result = verify_sign()
+        if result ~= "treat_as_unsigned" then
+            return result
+        end
     end
 
     if COOKIE_MISS_MAX > 0 and not get_cookie_value(COOKIE_NAME) then
@@ -907,7 +1132,7 @@ function _M.run()
         end
     end
 
-    local sr, srok, srtot = track_sign_ratio(ip, false)
+    local sr, srok, srtot = track_sign_ratio(ip, ua, false)
     if sr then
         local d = mk_detail()
         detail_add(d, "signed_in_window", tostring(srok))
@@ -944,10 +1169,35 @@ function _M.run()
         end
     end
 
+    local cookie_key = nil
+    local cookie_key_record_missing = false
+    if KEY_MODE == "dynamic" then
+        local ua = ngx_var.http_user_agent or ""
+        local ua_h = KEY_BIND_UA and ua_hash_fn(ua) or "default"
+        local bind_ip = KEY_BIND_IP and ip or "0.0.0.0"
+        local kr = get_key_record(bind_ip, ua_h)
+        if kr and (kr.current or kr.grace) then
+            cookie_key = (kr.current and kr.current.key) or (kr.grace and kr.grace.key)
+        else
+            local nk, nid = generate_key_pair()
+            local ne = ngx_time() + KEY_TTL
+            store_key_record(bind_ip, ua_h, { current = { key = nk, expire = ne, key_id = nid } })
+            cookie_key = nk
+            cookie_key_record_missing = true
+        end
+    end
+
     local v = get_cookie_value(COOKIE_NAME)
     if not v then
+        if KEY_MODE == "dynamic" and cookie_document_request(ngx_req.get_method()) then
+            -- Dynamic 文档只允许进入页面 bootstrap；不在 access 阶段根据
+            -- Accept/URI 猜测并发 Set-Cookie。新版 rfw.js 会从 token 端点
+            -- 获取 dynamic key 并在浏览器端生成 Cookie，API 仍要求 RFWDATA。
+            incr_stat("cookie_bootstrap_document", 1)
+            return
+        end
         if COOKIE_BOOTSTRAP then
-            issue_cookie()
+            issue_cookie(cookie_key)
             incr_stat("cookie_issued", 1)
         end
         local r, okc, tot = track_cookie(ip, false)
@@ -966,7 +1216,32 @@ function _M.run()
     local sig, sid, seqs, tss = v:match("^([%x]+)%.([%w%-]+)%.([%d]+)%.([%d]+)$")
     if sig then
         local t = tonumber(tss)
-        if not t or cookie_sig2(sid, seqs, tss) ~= sig:lower() then
+        local cookie_ok = false
+        if cookie_sig2(sid, seqs, tss, cookie_key) == sig:lower() then
+            cookie_ok = true
+        elseif KEY_MODE == "dynamic" then
+            local ua = ngx_var.http_user_agent or ""
+            local ua_h = KEY_BIND_UA and ua_hash_fn(ua) or "default"
+            local bind_ip = KEY_BIND_IP and ip or "0.0.0.0"
+            local kr = get_key_record(bind_ip, ua_h)
+            if kr then
+                if kr.grace and cookie_sig2(sid, seqs, tss, kr.grace.key) == sig:lower() then
+                    cookie_ok = true
+                end
+            end
+        end
+        if not t or not cookie_ok then
+            if t and cookie_key_record_missing and cookie_document_request(ngx_req.get_method()) then
+                -- 浏览器重启后可能只保留了旧动态 Cookie，而 shared dict 中
+                -- 的动态 key record 已经过期。对明确的 HTML 文档 GET/HEAD
+                -- 重新 bootstrap；后续 API 仍必须使用新 Cookie 或 RFWDATA。
+                -- 仅允许文档重新进入 bootstrap；不在 access 阶段发 Cookie。
+                -- 浏览器随后通过 /cgi-rfw/token + rfw.js 生成新 dynamic Cookie。
+                incr_stat("cookie_rebootstrap", 1)
+                rfw_debug("dynamic document rebootstrap allowed uri=" .. uri)
+                incr_stat("cookie_ok", 1)
+                return
+            end
             record_failure(ip, "cookie-tampered")
             local d = mk_detail()
             detail_add(d, "cookie_value", v)
@@ -980,24 +1255,39 @@ function _M.run()
         else
             age_ms = (now - t) * 1000
         end
+        local method = ngx_req.get_method()
+        local safe_method = cookie_safe_method(method)
         if COOKIE_TS_MAX > 0 and age_ms > COOKIE_TS_MAX * 1000 then
-            record_failure(ip, "cookie-stale")
             incr_stat("cookie_stale", 1)
-            if COOKIE_BOOTSTRAP and t < 100000000000 then
-                issue_cookie()
-                incr_stat("cookie_issued", 1)
-            end
             local d = mk_detail()
             detail_add(d, "sid", sid or "")
             detail_add(d, "req_ts", tss or "")
             detail_add(d, "ts_age_ms", tostring(age_ms))
+            if safe_method and COOKIE_BOOTSTRAP then
+                -- 只对已通过 HMAC 的安全方法做无感刷新；篡改 Cookie
+                -- 仍在前面直接拒绝，写操作仍严格拒绝 stale。
+                issue_cookie(cookie_key)
+                incr_stat("cookie_issued", 1)
+                rfw_debug("stale cookie refreshed for safe method=" .. method .. " uri=" .. uri)
+                incr_stat("cookie_ok", 1)
+                return
+            end
+            record_failure(ip, "cookie-stale")
             return deny("cookie-stale", d)
         end
 
         local seq = tonumber(seqs)
         local highest, last_seq, last_ts, last_first, last_count = read_seq(sid)
         if last_seq ~= nil and last_ts ~= nil and last_seq == seq and last_ts == t then
+            if safe_method then
+                -- 安全幂等请求可能在同一页面加载中共享一个 Cookie。
+                -- HMAC、时效和序号回退仍受检，但不累计同值重放次数。
+                incr_stat("cookie_ok", 1)
+                return
+            end
             if COOKIE_REPLAY_WINDOW > 0 and now_ms - last_first <= COOKIE_REPLAY_WINDOW * 1000 then
+                local nseq = math.max(highest or 0, seq) + 1
+                write_seq(sid, now, nseq, seq, t, last_first, last_count or 1)
                 local r, okc, tot = track_cookie(ip, true)
                 if r then
                     local d = mk_detail()
@@ -1051,31 +1341,12 @@ function _M.run()
         return
     end
 
-    local sig0, ts0, nonce0 = v:match("^([%x]+)%.([%d]+)%.([%w%-]+)$")
-    if sig0 then
-        local t = tonumber(ts0)
-        if t and cookie_sig(ts0, nonce0) == sig0:lower() then
-            issue_cookie()
-            incr_stat("cookie_issued", 1)
-            local r, okc, tot = track_cookie(ip, false)
-            if r then
-                local d = mk_detail()
-                detail_add(d, "cookie_ok_in_window", tostring(okc))
-                detail_add(d, "total_in_window", tostring(tot))
-                return deny("cookie-ratio-low", d)
-            end
-            return
-        end
-        record_failure(ip, "cookie-tampered")
-        local d = mk_detail()
-        detail_add(d, "cookie_value", v)
-        return deny("cookie-tampered", d)
-    end
-
-    record_failure(ip, "cookie-tampered")
+    -- 灰度 dynamic-only 版本不接受旧三段式 Cookie；只接受
+    -- sig.sid.seq.ts 的 dynamic Cookie 格式。
+    record_failure(ip, "cookie-format")
     local d = mk_detail()
     detail_add(d, "cookie_value", v)
-    return deny("cookie-tampered", d)
+    return deny("cookie-format", d)
 end
 
 function _M.check()
@@ -1084,8 +1355,26 @@ function _M.check()
 end
 
 _M.stats = stats
+function _M.header_filter()
+    local pc = ngx.ctx.rfw_pending_cookie
+    if not pc then return end
+    if ngx.ctx.rfw_pending_cookie_document then
+        local ct = tostring(ngx.header["Content-Type"] or ngx.var.sent_http_content_type or ""):lower()
+        local status = tonumber(ngx.status or 0) or 0
+        -- MIME 只用于确认是否发送 bootstrap Cookie；不能反过来授权请求。
+        if status >= 400 or not ct:find("text/html", 1, true) then return end
+    end
+    ngx.header["Set-Cookie"] = pc
+end
+
 _M.block_log = scan_block_log
 _M.scan_block_log = scan_block_log
+_M.get_key_record = get_key_record
+_M.rotate_key = rotate_key
+_M.ua_hash = ua_hash_fn
+_M.key_for = key_for
+_M.check_token_rate = check_token_rate
+_M.KEY_MODE = KEY_MODE
 _G.ma_rfw_core = _M
 
 local ok, phase = pcall(ngx.get_phase)

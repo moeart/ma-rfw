@@ -1,0 +1,386 @@
+{
+  "total": 47,
+  "passed": 47,
+  "failed": 0,
+  "skipped": 0,
+  "checks": [
+    {
+      "suite": "dynamic",
+      "name": "valid dynamic RFWDATA",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "current key + HMAC + nonce"
+    },
+    {
+      "suite": "dynamic",
+      "name": "delete _RFW does not bypass valid RFWDATA",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Header credential remains sufficient"
+    },
+    {
+      "suite": "dynamic",
+      "name": "delete RFWDATA with Cookie is rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "RFWDATA-only gray-release profile"
+    },
+    {
+      "suite": "dynamic",
+      "name": "delete RFWDATA and _RFW is rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "dynamic strict gate"
+    },
+    {
+      "suite": "dynamic",
+      "name": "body tamper",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "body hash mismatch"
+    },
+    {
+      "suite": "dynamic",
+      "name": "URI tamper",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "signed URI mismatch"
+    },
+    {
+      "suite": "dynamic",
+      "name": "method tamper",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "signed method mismatch"
+    },
+    {
+      "suite": "dynamic",
+      "name": "old static secret RFWDATA",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "legacy secret fallback disabled"
+    },
+    {
+      "suite": "dynamic",
+      "name": "wrong IP/UA dynamic key",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "key record missing is strict deny"
+    },
+    {
+      "suite": "dynamic",
+      "name": "dynamic Cookie valid on document",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "dynamic Cookie HMAC; API remains strict Header Gate"
+    },
+    {
+      "suite": "dynamic",
+      "name": "Cookie fallback disabled by default",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "RFWDATA-only gray-release profile"
+    },
+    {
+      "suite": "dynamic",
+      "name": "explicit Cookie fallback remains fully checked",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "opt-in compatibility only"
+    },
+    {
+      "suite": "dynamic",
+      "name": "Cookie fallback low sign ratio rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "10th unsigned Cookie fallback request reaches sign-ratio-low"
+    },
+    {
+      "suite": "dynamic",
+      "name": "old static Cookie rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "legacy Cookie fallback disabled"
+    },
+    {
+      "suite": "dynamic",
+      "name": "Firefox/urllib document without Fetch Metadata",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "compatibility bootstrap; Set-Cookie=False"
+    },
+    {
+      "suite": "dynamic",
+      "name": "API document metadata spoof rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "common API path remains strict"
+    },
+    {
+      "suite": "dynamic",
+      "name": "Controller .do without RFWDATA rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "API/controller never document bootstrap"
+    },
+    {
+      "suite": "dynamic",
+      "name": "Cookie fallback disabled remains strict",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "explicit RFWDATA-only mode"
+    },
+    {
+      "suite": "dynamic",
+      "name": "non-whitelisted document path rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "explicit dynamic_document_paths"
+    },
+    {
+      "suite": "dynamic",
+      "name": "HTML document bootstrap without RFWDATA",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "document path allow; Cookie is token/JS generated=False"
+    },
+    {
+      "suite": "dynamic",
+      "name": "strict Fetch Metadata rejects urllib-style document",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "opt-in strict compatibility boundary"
+    },
+    {
+      "suite": "dynamic",
+      "name": "strict Fetch Metadata real document",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Sec-Fetch-Dest=document"
+    },
+    {
+      "suite": "dynamic",
+      "name": "strict mode with sign disabled",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "explicit configuration error; no Cookie fallback"
+    },
+    {
+      "suite": "dynamic",
+      "name": "static mode unavailable in gray release",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Lua rejects key_mode=static"
+    },
+    {
+      "suite": "cookie",
+      "name": "dynamic Cookie tamper",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "cookie-tampered"
+    },
+    {
+      "suite": "cookie",
+      "name": "safe GET stale refresh",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Set-Cookie=True"
+    },
+    {
+      "suite": "cookie",
+      "name": "document refresh JSON does not emit Cookie",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Set-Cookie=False"
+    },
+    {
+      "suite": "cookie",
+      "name": "document refresh HTML emits Cookie",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Set-Cookie=True"
+    },
+    {
+      "suite": "cookie",
+      "name": "stale POST rejected",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "cookie-stale"
+    },
+    {
+      "suite": "cookie",
+      "name": "safe GET same-value burst",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "8 GETs allowed"
+    },
+    {
+      "suite": "cookie",
+      "name": "strict POST sixth reuse",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "cookie-replay"
+    },
+    {
+      "suite": "cookie",
+      "name": "expired key HTML rebootstrap",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "Set-Cookie=False"
+    },
+    {
+      "suite": "cookie",
+      "name": "expired key API old Cookie denied",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "strict API does not rebootstrap"
+    },
+    {
+      "suite": "webui",
+      "name": "dynamic token endpoint JSON",
+      "observed": "200",
+      "expected": "200",
+      "status": "PASS",
+      "detail": "body keys=['cookie_document_require_fetch_metadata', 'cookie_fallback', 'cookie_tag_hex', 'cookie_ttl', 'dynamic_document_paths', 'dynamic_sign_ratio_fail', 'expires_in', 'key', 'key_mode', 'quota_exhausted', 'server_time', 'strict_sign']"
+    },
+    {
+      "suite": "webui",
+      "name": "token reports strict dynamic-only policy",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "dynamic-only/strict/fallback/tag"
+    },
+    {
+      "suite": "webui",
+      "name": "version is v4.3.0",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "WebUI brand version"
+    },
+    {
+      "suite": "webui",
+      "name": "SNAP hidden in log renderer",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "frontend defensive filter"
+    },
+    {
+      "suite": "webui",
+      "name": "SNAP filtered from log API",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "server-side log filter"
+    },
+    {
+      "suite": "webui",
+      "name": "config page exposes v4 policy fields",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "fields=['cfg-key-mode', 'cfg-dynamic-strict-sign', 'cfg-dynamic-sign-ratio-fail', 'cfg-dynamic-allow-cookie-fallback', 'cfg-strict-api-paths', 'cfg-dynamic-document-paths', 'cfg-dynamic-cookie-tag-hex', 'cfg-cookie-document-require-fetch']"
+    },
+    {
+      "suite": "webui",
+      "name": "config save enforces dynamic-only",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "static/legacy/secret inputs removed"
+    },
+    {
+      "suite": "webui",
+      "name": "reject dynamic strict with sign disabled",
+      "observed": "400",
+      "expected": "400",
+      "status": "PASS",
+      "detail": "configuration contradiction rejected"
+    },
+    {
+      "suite": "saz",
+      "name": "production home document",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "old Cookie rebootstrap allowed; response Cookie=False"
+    },
+    {
+      "suite": "saz",
+      "name": "production sequence after dynamic replacement",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "sessions=217, denied=[]"
+    },
+    {
+      "suite": "saz",
+      "name": "60 minute browser restart HTML",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "new Cookie=False"
+    },
+    {
+      "suite": "saz",
+      "name": "60 minute browser restart API old Cookie",
+      "observed": "403",
+      "expected": "403",
+      "status": "PASS",
+      "detail": "strict dynamic API requires new RFWDATA"
+    },
+    {
+      "suite": "saz",
+      "name": "static legacy profile not exercised",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "dynamic-only gray release"
+    },
+    {
+      "suite": "performance",
+      "name": "dynamic-only 300 signed requests",
+      "observed": "ALLOW",
+      "expected": "ALLOW",
+      "status": "PASS",
+      "detail": "elapsed=0.0298s, rps=10081.7, denied=0"
+    }
+  ],
+  "config": "<runtime-config.json>",
+  "saz": "<production-capture.saz>"
+}

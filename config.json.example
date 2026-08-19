@@ -1,72 +1,69 @@
 {
-    "___secret": "共享密钥(用于请求签名/cookie 签名)",
-    "secret": "CHANGE_ME_SECRET",
+  "key_mode": "dynamic",
+  "dynamic_strict_sign": true,
+  "dynamic_sign_ratio_fail": true,
+  "dynamic_allow_cookie_fallback": false,
+  "dynamic_document_paths": ["/", "/portal-web/"],
+  "dynamic_cookie_tag_hex": 32,
 
-    "___shared_dict": "nginx 共享内存配置, nginx.conf 必须声明: lua_shared_dict rfw 64m;",
-    "shared_dict": {
-        "dict_name": "rfw",
-        "key_prefix": "rfw:"
-    },
+  "key_ttl": 1800,
+  "key_grace": 90,
+  "key_advance_refresh": 30,
+  "key_bind_ip": true,
+  "key_bind_ua": true,
+  "key_fetch_quota": 1000,
+  "key_quota_window": 86400,
+  "token_rate_limit": 10,
+  "token_rate_window": 60,
 
-    "___cookie": "cookie 配置",
-    "cookie_name": "_RFW",
-    "cookie_ttl": 86400,
-    "cookie_ts_max": 60,
-    "cookie_bootstrap": true,
-    "cookie_replay_window": 2,
-    "cookie_replay_max": 5,
+  "shared_dict": {
+    "dict_name": "rfw",
+    "key_prefix": "rfw:"
+  },
 
-    "___seq": "会话序号",
-    "seq_slack": 10,
-    "seq_ttl": 86400,
-    "seq_cache_ttl": 3,
+  "cookie_name": "_RFW",
+  "cookie_ttl": 86400,
+  "cookie_ts_max": 300,
+  "cookie_bootstrap": true,
+  "cookie_replay_window": 2,
+  "cookie_replay_max": 5,
+  "cookie_safe_methods": ["GET", "HEAD", "OPTIONS"],
+  "cookie_rebootstrap_document": true,
+  "cookie_document_require_fetch_metadata": false,
 
-    "___sign": "签名校验",
-    "sign_enabled": true,
-    "sign_window": 60,
-    "sign_ratio_req": 10,
-    "sign_ratio_min": 0.5,
-    "sign_ratio_fail": false,
+  "seq_slack": 10,
+  "seq_ttl": 86400,
+  "seq_cache_ttl": 3,
 
-    "___static_ext": "静态资源扩展名(不参与签名校验)",
-    "static_ext": [
-        ".html", ".htm", ".js", ".css",
-        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
-        ".woff", ".woff2", ".ttf", ".eot", ".map", ".pdf"
-    ],
+  "sign_enabled": true,
+  "sign_window": 60,
+  "sign_ratio_req": 10,
+  "sign_ratio_min": 0.5,
 
-    "___cookie_ratio": "覆盖率判定",
-    "cookie_ratio_req": 10,
-    "cookie_ratio_min": 0.5,
-    "cookie_ratio_fail": false,
+  "static_ext": [
+    ".html", ".htm", ".js", ".css",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot", ".map", ".pdf"
+  ],
 
-    "___cookie_missing": "无 cookie 日配额(0 = 关闭)",
-    "cookie_missing_max": 50,
-    "cookie_missing_ttl": 86400,
+  "cookie_ratio_req": 10,
+  "cookie_ratio_min": 0.5,
+  "cookie_missing_max": 50,
+  "cookie_missing_ttl": 86400,
 
-    "___replay": "重放检测",
-    "replay_enabled": true,
-    "replay_threshold": 5,
-    "replay_relink_sec": 2,
+  "replay_enabled": true,
+  "replay_threshold": 5,
+  "replay_relink_sec": 2,
 
-    "___penalty": "惩罚: 窗口内失败 fail_max 次 → 封禁 block_time 秒",
-    "fail_max": 5,
-    "fail_window": 60,
-    "block_time": 600,
-    "block_cache_ttl": 60,
+  "fail_max": 5,
+  "fail_window": 60,
+  "block_time": 600,
+  "block_cache_ttl": 60,
 
-    "___sweep": "后台清扫间隔(秒)",
-    "sweep_interval": 60,
+  "sweep_interval": 60,
+  "snap_log_interval": 1800,
 
-    "___snap_log": "SNAP 快照日志落盘间隔(秒), 0 = 每次清扫都写; 建议 1800(半小时) / 3600(1小时)",
-    "snap_log_interval": 1800,
-
-    "___admin_whitelist": "管理面板访问白名单(留空 = 允许所有)",
-    "admin_whitelist": ["127.0.0.1", "::1"],
-
-    "___admin_trusted_proxies": "受信任反代 IP 列表(仅当 direct IP 在此列表才解析 XFF, 留空=从不信任头部)",
-    "admin_trusted_proxies": [],
-
-    "___debug": "调试模式",
-    "debug": false
+  "admin_whitelist": ["127.0.0.1", "::1"],
+  "admin_trusted_proxies": [],
+  "debug": false
 }
