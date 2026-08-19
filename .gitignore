@@ -1,3 +1,10 @@
+# Replay Firewall runtime output
+rfw_stats.json
+data/*.json
+logs/*.log
+logs/*.saz
+
+# Local regression output
+rfw_v4_*_hardened_test.json
+rfw_v4_*_hardened_test.md
 config.json
-/logs/*
-!/logs/.keep

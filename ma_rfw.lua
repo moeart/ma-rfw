@@ -20,6 +20,17 @@ local _M = {}
 local cjson = require("cjson")
 local src = debug.getinfo(1, "S").source
 local plugin_dir = (src:sub(1, 1) == "@" and src:sub(2) or src):match("^(.*)[/\\][^/\\]+$") or "."
+local DATA_DIR = plugin_dir .. "/data"
+local KEY_STATE_FILE = DATA_DIR .. "/rfw_key_records.json"
+local STATS_FILE = DATA_DIR .. "/rfw_stats.json"
+local RFW_BOOT_TS = os.time()
+-- Nginx reload/restart 后给旧客户端一个短暂恢复窗口；此窗口内缺 Key 不计入封禁失败。
+local RESTART_RECOVERY_GRACE = 180
+local KEY_STATE_LOADED = false
+local KEY_STATE_RESTORING = false
+local KEY_STATE_WARNED = false
+local restore_key_state
+local persist_key_state
 local sha = dofile(plugin_dir .. "/sha256.lua")
 
 local config
@@ -43,7 +54,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.1 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.2 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true
@@ -221,6 +232,7 @@ end
 
 local function get_key_record(ip, ua_h)
     if not store then return nil end
+    if restore_key_state then restore_key_state() end
     local v = store:get(key_record_store_key(ip, ua_h))
     if not v then return nil end
     local ok, record = pcall(cjson.decode, v)
@@ -244,6 +256,78 @@ end
 local function store_key_record(ip, ua_h, record)
     if not store then return end
     store:set(key_record_store_key(ip, ua_h), cjson.encode(record), KEY_TTL + KEY_GRACE + 60)
+    if persist_key_state and not KEY_STATE_RESTORING then persist_key_state() end
+end
+
+local function ensure_data_dir()
+    local f = io.open(DATA_DIR .. "/.keep", "a")
+    if f then f:close(); return true end
+    if not KEY_STATE_WARNED then
+        KEY_STATE_WARNED = true
+        rfw_log("ERROR", "data 目录不可写，dynamic Key 无法持久化: " .. DATA_DIR)
+    end
+    return false
+end
+
+persist_key_state = function()
+    if not store or KEY_STATE_RESTORING or not ensure_data_dir() then return false end
+    local records = {}
+    local prefix = KEY_RECORD_PREFIX
+    local keys = store:get_keys(65535) or {}
+    for _, k in ipairs(keys) do
+        if k:sub(1, #prefix) == prefix then
+            local raw = store:get(k)
+            if raw then
+                local ok, record = pcall(cjson.decode, raw)
+                if ok and type(record) == "table" then
+                    records[k:sub(#prefix + 1)] = record
+                end
+            end
+        end
+    end
+    local payload = cjson.encode({ version = 1, updated_at = os.time(), records = records })
+    local tmp = KEY_STATE_FILE .. ".tmp." .. tostring(os.time()) .. "." .. tostring(math.random(1, 2147483647))
+    local f = io.open(tmp, "w")
+    if not f then return false end
+    f:write(payload); f:close()
+    local ok = os.rename(tmp, KEY_STATE_FILE)
+    if not ok then os.remove(tmp) end
+    return ok == true
+end
+
+restore_key_state = function()
+    if KEY_STATE_LOADED or not store then return end
+    KEY_STATE_LOADED = true
+    if not ensure_data_dir() then return end
+    local f = io.open(KEY_STATE_FILE, "r")
+    if not f then return end
+    local content = f:read("*a"); f:close()
+    local ok, payload = pcall(cjson.decode, content)
+    if not ok or type(payload) ~= "table" or type(payload.records) ~= "table" then return end
+    local now = ngx_time()
+    KEY_STATE_RESTORING = true
+    for suffix, record in pairs(payload.records) do
+        if type(suffix) == "string" and type(record) == "table" then
+            local ip, ua_h = suffix:match("^(.*):([%w]+)$")
+            if ip and ua_h then
+                if record.current and tonumber(record.current.expire or 0) < now then
+                    if record.grace and tonumber(record.grace.expire or 0) >= now then
+                        record.current = record.grace
+                    else
+                        record.current = nil
+                    end
+                    record.grace = nil
+                elseif record.grace and tonumber(record.grace.expire or 0) < now then
+                    record.grace = nil
+                end
+                if record.current or record.grace then
+                    local ttl = KEY_TTL + KEY_GRACE + 60
+                    store:set(key_record_store_key(ip, ua_h), cjson.encode(record), ttl)
+                end
+            end
+        end
+    end
+    KEY_STATE_RESTORING = false
 end
 
 local function rotate_key(ip, ua_h)
@@ -313,7 +397,6 @@ local function get_stat(k)
 end
 
 -- ===== 统计持久化: nginx 重启后恢复计数, 保证当日累计跨重启连续 =====
-local STATS_FILE = plugin_dir .. "/rfw_stats.json"
 local PERSIST_KEYS = {
     "requests", "signed_ok", "cookie_ok", "cookie_issued",
     "no_cookie_tracked", "cookie_missing", "static_ok", "blocked_hit",
@@ -328,6 +411,7 @@ local function persist_stats()
     end
     t.day_key = get_stat("day_key")
     t.day_baseline = get_stat("day_baseline")
+    if not ensure_data_dir() then return end
     local f = io.open(STATS_FILE, "w")
     if f then
         f:write(cjson.encode(t))
@@ -567,6 +651,9 @@ local function deny(reason, detail)
     load_html()
     ngx.status = ngx.HTTP_FORBIDDEN
     ngx.header["Content-Type"] = "text/html; charset=utf-8"
+    if reason == "dynamic-key-missing" then
+        ngx.header["X-RFW-Recover"] = "token"
+    end
     if DEBUG then
         local panel = debug_panel(reason, detail)
         local pos = string.find(PENALTY_HTML, "</body>", 1, true)
@@ -1003,7 +1090,13 @@ local function verify_sign()
         if not key_record then
             rfw_debug("dynamic: no key record for " .. bind_ip .. " UA=" .. ua_h)
             if dynamic_header_required() then
-                record_failure(ip, "dynamic-key-missing")
+                -- Nginx reload/restart 期间 shared dict 可能尚未完成恢复。
+                -- 这类缺 Key 不是密码学失败，短暂窗口内不能把客户端直接推入 IP 封禁。
+                if ngx_time() - RFW_BOOT_TS > RESTART_RECOVERY_GRACE then
+                    record_failure(ip, "dynamic-key-missing")
+                else
+                    incr_stat("restart_key_missing", 1)
+                end
                 return deny("dynamic-key-missing", d)
             end
             return "treat_as_unsigned"
@@ -1055,6 +1148,7 @@ local function verify_sign()
 end
 
 function _M.run()
+    if restore_key_state then restore_key_state() end
     local uri = ngx_var.uri
 
     if uri:sub(1, 8) == "/cgi-rfw" then

@@ -3,7 +3,7 @@
   "__COMMENT_DYNAMIC_DOCUMENT_PATHS": "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
   "dynamic_document_paths": [
     "/",
-    "/portal-web/"
+    "/webapp/"
   ],
   "__COMMENT_STRICT_API_PATHS": "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
   "strict_api_paths": [],

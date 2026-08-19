@@ -192,7 +192,7 @@ def rfwd_value(key: str, method: str, uri: str, body: bytes, ts: int, nonce: str
 
 
 class Harness:
-    def __init__(self, repo: Path, config_path: Path, mode: str, overrides: dict[str, Any] | None = None):
+    def __init__(self, repo: Path, config_path: Path, mode: str, overrides: dict[str, Any] | None = None, data_seed: bytes | None = None):
         self.repo = repo
         if mode != "dynamic":
             raise ValueError("gray-release build is dynamic-only")
@@ -201,6 +201,11 @@ class Harness:
         self.work.mkdir(parents=True)
         for f in ("ma_rfw.lua", "sha256.lua", "blocked.html", "webui.lua"):
             shutil.copy2(repo / f, self.work / f)
+        (self.work / "data").mkdir()
+        keep = repo / "data" / ".keep"
+        if keep.is_file(): shutil.copy2(keep, self.work / "data" / ".keep")
+        if data_seed is not None:
+            (self.work / "data" / "rfw_key_records.json").write_bytes(data_seed)
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
         cfg.update({"debug": False, "sign_ratio_req": 100000, "cookie_ratio_req": 100000, "token_rate_limit": 100000, "key_fetch_quota": 100000})
         if overrides: cfg.update(overrides)
@@ -260,17 +265,21 @@ function(method,uri,body,cookie,rfwd,now,ip,ua,accept,dest,rfw_on,response_ct)
   ngx.req.get_method=function() return method or "GET" end
   if response_ct then ngx.header["Content-Type"] = response_ct end
   core.run(); if core.header_filter then core.header_filter() end
-  return _exit_code,table.concat(_says),ngx.header["Set-Cookie"]
+  return _exit_code,table.concat(_says),ngx.header["Set-Cookie"],ngx.header["X-RFW-Recover"]
 end
 ''')
         self.rotate_lua = self.lua.eval('function(ip,uh) return core.rotate_key(ip,uh) end')
         self.ua_hash_lua = self.lua.eval('function(ua) return core.ua_hash(ua) end')
+        self.stat_lua = self.lua.eval('function(k) return core.stats[k] end')
 
     def close(self):
         shutil.rmtree(self.work, ignore_errors=True)
 
     def key(self, ip=TEST_IP, ua=TEST_UA):
         k, _, _ = self.rotate_lua(ip, self.ua_hash_lua(ua)); return str(k)
+
+    def stat(self, name: str):
+        return self.stat_lua(name)
 
     def run(self, method="GET", uri="/api/test", body=b"", cookie=None, rfwd=None,
             now=BASE_NOW, ip=TEST_IP, ua=TEST_UA, accept="application/json", dest="empty", rfw_on="1", response_ct=None):
@@ -306,41 +315,41 @@ def run_core_tests(repo: Path, config_path: Path, out: list[Check]):
     other_key = h.key("198.51.100.21","Other-UA/1.0")
     stolen = api_headers(other_key,"GET",req_uri,body,int(BASE_NOW),"dyn-other")
     add(out,"dynamic","wrong IP/UA dynamic key",h.run(uri=req_uri,rfwd=stolen,ip="198.51.100.22",ua="Victim-UA/1.0")[0],403,"key record missing is strict deny")
-    add(out,"dynamic","dynamic Cookie valid on document",h.run(uri="/portal-web/",cookie=cookie_value(dyn_key,"dyn-sid",1,int(BASE_NOW*1000),32),accept="text/html",dest="document")[0],None,"dynamic Cookie HMAC; API remains strict Header Gate")
+    add(out,"dynamic","dynamic Cookie valid on document",h.run(uri="/webapp/",cookie=cookie_value(dyn_key,"dyn-sid",1,int(BASE_NOW*1000),32),accept="text/html",dest="document")[0],None,"dynamic Cookie HMAC; API remains strict Header Gate")
     sync_cookie = cookie_value(dyn_key,"sync-sid",1,int(BASE_NOW*1000),32)
-    add(out,"dynamic","Cookie fallback disabled by default",h.run(uri="/portal-web/portal/DataDictController/getDevToolMd5.do",cookie=sync_cookie,accept="application/json",dest="empty")[0],403,"RFWDATA-only gray-release profile")
+    add(out,"dynamic","Cookie fallback disabled by default",h.run(uri="/webapp/portal/DataDictController/getDevToolMd5.do",cookie=sync_cookie,accept="application/json",dest="empty")[0],403,"RFWDATA-only gray-release profile")
     fallback_h = Harness(repo, config_path, "dynamic", {"dynamic_allow_cookie_fallback": True, "fail_max": 100000})
     fallback_key = fallback_h.key(); fallback_cookie = cookie_value(fallback_key,"sync-fallback",1,int(BASE_NOW*1000),32)
-    add(out,"dynamic","explicit Cookie fallback remains fully checked",fallback_h.run(uri="/portal-web/portal/DataDictController/getDevToolMd5.do",cookie=fallback_cookie,accept="application/json",dest="empty")[0],None,"opt-in compatibility only")
-    add(out,"dynamic","Cookie fallback rejects write method",fallback_h.run(method="POST",uri="/portal-web/portal/DataDictController/getDevToolMd5.do",body=b"{}",cookie=fallback_cookie,accept="application/json",dest="empty")[0],403,"headerless fallback is read-only")
+    add(out,"dynamic","explicit Cookie fallback remains fully checked",fallback_h.run(uri="/webapp/portal/DataDictController/getDevToolMd5.do",cookie=fallback_cookie,accept="application/json",dest="empty")[0],None,"opt-in compatibility only")
+    add(out,"dynamic","Cookie fallback rejects write method",fallback_h.run(method="POST",uri="/webapp/portal/DataDictController/getDevToolMd5.do",body=b"{}",cookie=fallback_cookie,accept="application/json",dest="empty")[0],403,"headerless fallback is read-only")
     fallback_h.close()
     ratio_h = Harness(repo, config_path, "dynamic", {"sign_ratio_req": 10, "sign_ratio_min": 0.5, "dynamic_allow_cookie_fallback": True, "fail_max": 100000})
     ratio_key = ratio_h.key(); ratio_cookie = cookie_value(ratio_key,"ratio-sid",1,int(BASE_NOW*1000),32)
-    ratio_codes = [ratio_h.run(uri="/portal-web/portal/DataDictController/getDevToolMd5.do",cookie=ratio_cookie,accept="application/json",dest="empty",now=BASE_NOW+i)[0] for i in range(1, 11)]
+    ratio_codes = [ratio_h.run(uri="/webapp/portal/DataDictController/getDevToolMd5.do",cookie=ratio_cookie,accept="application/json",dest="empty",now=BASE_NOW+i)[0] for i in range(1, 11)]
     add(out,"dynamic","Cookie fallback low sign ratio rejected",ratio_codes[-1],403,"10th unsigned Cookie fallback request reaches sign-ratio-low")
     ratio_h.close()
     old_cookie = cookie_value("legacy-static-secret","old-sid",1,int(BASE_NOW*1000),16)
     add(out,"dynamic","old static Cookie rejected",h.run(uri=req_uri,cookie=old_cookie)[0],403,"legacy Cookie fallback disabled")
-    fake_doc = h.run(uri="/portal-web/",cookie=None,accept="text/html,application/xhtml+xml",dest="empty")
+    fake_doc = h.run(uri="/webapp/",cookie=None,accept="text/html,application/xhtml+xml",dest="empty")
     add(out,"dynamic","Firefox/urllib document without Fetch Metadata",fake_doc[0],None,"compatibility bootstrap; Set-Cookie="+str(bool(fake_doc[2])))
     api_spoof = h.run(uri="/api/audit",cookie=None,accept="text/html",dest="document")
     add(out,"dynamic","API document metadata spoof rejected",api_spoof[0],403,"common API path remains strict")
-    controller = h.run(uri="/portal-web/portal/DataDictController/getDevToolMd5.do",cookie=None,accept="text/html",dest="empty")
+    controller = h.run(uri="/webapp/portal/DataDictController/getDevToolMd5.do",cookie=None,accept="text/html",dest="empty")
     add(out,"dynamic","Controller .do without RFWDATA rejected",controller[0],403,"API/controller never document bootstrap")
     no_cookie_fallback = Harness(repo, config_path, "dynamic", {"dynamic_allow_cookie_fallback": False, "fail_max": 100000})
     no_cookie_fallback_key = no_cookie_fallback.key()
     no_cookie_fallback_cookie = cookie_value(no_cookie_fallback_key,"sync-disabled",1,int(BASE_NOW*1000),32)
-    add(out,"dynamic","Cookie fallback disabled remains strict",no_cookie_fallback.run(uri="/portal-web/portal/DataDictController/getDevToolMd5.do",cookie=no_cookie_fallback_cookie,accept="application/json",dest="empty")[0],403,"explicit RFWDATA-only mode")
+    add(out,"dynamic","Cookie fallback disabled remains strict",no_cookie_fallback.run(uri="/webapp/portal/DataDictController/getDevToolMd5.do",cookie=no_cookie_fallback_cookie,accept="application/json",dest="empty")[0],403,"explicit RFWDATA-only mode")
     no_cookie_fallback.close()
-    unknown_doc = h.run(uri="/portal-web/index",cookie=None,accept="text/html",dest="empty")
+    unknown_doc = h.run(uri="/webapp/index",cookie=None,accept="text/html",dest="empty")
     add(out,"dynamic","non-whitelisted document path rejected",unknown_doc[0],403,"explicit dynamic_document_paths")
-    doc = h.run(uri="/portal-web/",cookie=None,accept="text/html,application/xhtml+xml",dest="document",response_ct="text/html; charset=UTF-8")
+    doc = h.run(uri="/webapp/",cookie=None,accept="text/html,application/xhtml+xml",dest="document",response_ct="text/html; charset=UTF-8")
     add(out,"dynamic","HTML document bootstrap without RFWDATA",doc[0],None,"document path allow; Cookie is token/JS generated="+str(bool(doc[2])))
     h.close()
     strict_doc = Harness(repo, config_path, "dynamic", {"cookie_document_require_fetch_metadata": True, "fail_max": 100000})
-    strict_fake = strict_doc.run(uri="/portal-web/",cookie=None,accept="text/html",dest="empty")
+    strict_fake = strict_doc.run(uri="/webapp/",cookie=None,accept="text/html",dest="empty")
     add(out,"dynamic","strict Fetch Metadata rejects urllib-style document",strict_fake[0],403,"opt-in strict compatibility boundary")
-    strict_real = strict_doc.run(uri="/portal-web/",cookie=None,accept="text/html",dest="document")
+    strict_real = strict_doc.run(uri="/webapp/",cookie=None,accept="text/html",dest="document")
     add(out,"dynamic","strict Fetch Metadata real document",strict_real[0],None,"Sec-Fetch-Dest=document")
     strict_doc.close()
     try:
@@ -357,6 +366,24 @@ def run_core_tests(repo: Path, config_path: Path, out: list[Check]):
         static_rejected = True
     add(out,"dynamic","static mode unavailable in gray release",None if static_rejected else 500,None,"Lua rejects key_mode=static")
 
+    restart_src = Harness(repo, config_path, "dynamic", {"fail_max": 100000})
+    restart_key = restart_src.key()
+    restart_seed = (restart_src.work / "data" / "rfw_key_records.json").read_bytes()
+    restart_src.close()
+    restart_dst = Harness(repo, config_path, "dynamic", {"fail_max": 100000}, data_seed=restart_seed)
+    restart_hdr = rfwd_value(restart_key, "GET", "/api/restart-persist", b"", int(BASE_NOW + 1), "restart-persist")
+    add(out,"dynamic","dynamic Key survives new worker restart",restart_dst.run(uri="/api/restart-persist",rfwd=restart_hdr,now=BASE_NOW+1)[0],None,"persistent data/rfw_key_records.json")
+    restart_dst.close()
+
+    missing = Harness(repo, config_path, "dynamic", {"fail_max": 2})
+    missing_hdr = rfwd_value("not-the-current-key", "GET", "/api/restart-missing", b"", int(BASE_NOW + 1), "restart-missing")
+    missing_results = [missing.run(uri="/api/restart-missing",rfwd=missing_hdr,now=BASE_NOW+1+i) for i in range(3)]
+    first_codes = [x[0] for x in missing_results]
+    add(out,"dynamic","restart missing Key denied without ban during grace",first_codes[-1],403,"failures="+str(missing.stat("failures")))
+    add(out,"dynamic","missing Key requests automatic token recovery",missing_results[-1][3],"token","X-RFW-Recover response marker")
+    add(out,"dynamic","missing Key enters failure chain after grace",missing.run(uri="/api/restart-missing",rfwd=missing_hdr,now=BASE_NOW+181)[0],403,"failures="+str(missing.stat("failures")))
+    missing.close()
+
 
 def run_cookie_tests(repo: Path, config_path: Path, out: list[Check]):
     # Cookie behavior is tested with the explicit compatibility fallback enabled;
@@ -367,9 +394,9 @@ def run_cookie_tests(repo: Path, config_path: Path, out: list[Check]):
     stale=cookie_value(key,"stale-sid",1,int((BASE_NOW-120)*1000),32)
     st=h.run(uri=uri,cookie=stale); add(out,"cookie","safe GET stale refresh",st[0],None,"Set-Cookie="+str(bool(st[2])))
     stale_doc=cookie_value(key,"stale-doc",1,int((BASE_NOW-600)*1000),32)
-    json_refresh=h.run(uri="/portal-web/",cookie=stale_doc,response_ct="application/json",accept="application/json",dest="empty")
+    json_refresh=h.run(uri="/webapp/",cookie=stale_doc,response_ct="application/json",accept="application/json",dest="empty")
     add(out,"cookie","document refresh JSON does not emit Cookie",json_refresh[0],None,"Set-Cookie="+str(bool(json_refresh[2])))
-    html_refresh=h.run(uri="/portal-web/",cookie=stale_doc,response_ct="text/html; charset=UTF-8",accept="text/html",dest="empty")
+    html_refresh=h.run(uri="/webapp/",cookie=stale_doc,response_ct="text/html; charset=UTF-8",accept="text/html",dest="empty")
     add(out,"cookie","document refresh HTML emits Cookie",html_refresh[0],None,"Set-Cookie="+str(bool(html_refresh[2])))
     post=h.run(method="POST",uri=uri,body=b"{}",cookie=stale); add(out,"cookie","stale POST rejected",post[0],403,"cookie-stale")
     dup=cookie_value(key,"dup-sid",1,int(BASE_NOW*1000),32)
@@ -384,7 +411,7 @@ def run_cookie_tests(repo: Path, config_path: Path, out: list[Check]):
 
     h = Harness(repo, config_path, "dynamic", {"key_ttl":30,"key_grace":5})
     key=h.key(); old=cookie_value(key,"reboot-sid",1,int(BASE_NOW*1000),32)
-    doc=h.run(uri="/portal-web/",cookie=old,now=BASE_NOW+40,accept="text/html",dest="document")
+    doc=h.run(uri="/webapp/",cookie=old,now=BASE_NOW+40,accept="text/html",dest="document")
     add(out,"cookie","expired key HTML rebootstrap",doc[0],None,"Set-Cookie="+str(bool(doc[2])))
     api=h.run(uri="/api/after-reboot",cookie=old,now=BASE_NOW+41)
     add(out,"cookie","expired key API old Cookie denied",api[0],403,"strict API does not rebootstrap")
@@ -399,7 +426,7 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     add(out,"webui","dynamic token endpoint JSON",result[0],200,"body keys="+str(sorted(data.keys())))
     add(out,"webui","token reports strict dynamic-only policy",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False else 500,None,"dynamic-only/strict/fallback/tag")
     page=h.run(uri="/cgi-rfw/config",ip="127.0.0.1")
-    add(out,"webui","version is v4.3.1",None if "<span>v4.3.1</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
+    add(out,"webui","version is v4.3.2",None if "<span>v4.3.2</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
     log_page=h.run(uri="/cgi-rfw/logs",ip="127.0.0.1")
     add(out,"webui","SNAP hidden in log renderer",None if "o.attack_method==='SNAP'" in log_page[1] else 500,None,"frontend defensive filter")
     log_dir=h.work/"logs"; log_dir.mkdir(exist_ok=True)
@@ -415,7 +442,7 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     required_ids=["strict-api-path-tags","document-path-tags","strict-api-path-input","document-path-input","cfg-cookie-document-require-fetch","help-text"]
     hidden_ids=["cfg-key-mode","cfg-dynamic-strict-sign","cfg-dynamic-sign-ratio-fail","cfg-dynamic-allow-cookie-fallback","cfg-dynamic-cookie-tag-hex","cfg-cookie-name","cfg-cookie-bootstrap","cfg-cookie-safe-methods","cfg-replay-enabled"]
     add(out,"webui","config page uses Chinese editable fields",None if all(x in page[1] for x in required_ids) and all(x not in page[1] for x in hidden_ids) and "Cookie" in page[1] else 500,None,"visible="+str(required_ids)+", hidden_fixed="+str(hidden_ids))
-    save_body=json.dumps({"key_mode":"static","secret":"attacker-secret","dynamic_strict_sign":False,"dynamic_sign_ratio_fail":False,"dynamic_allow_legacy_secret":True,"dynamic_allow_legacy_cookie":True,"dynamic_allow_cookie_fallback":True,"strict_api_paths":["/api/"],"dynamic_document_paths":["/","/portal-web/"],"dynamic_cookie_tag_hex":31,"cookie_document_require_fetch_metadata":True})
+    save_body=json.dumps({"key_mode":"static","secret":"attacker-secret","dynamic_strict_sign":False,"dynamic_sign_ratio_fail":False,"dynamic_allow_legacy_secret":True,"dynamic_allow_legacy_cookie":True,"dynamic_allow_cookie_fallback":True,"strict_api_paths":["/api/"],"dynamic_document_paths":["/","/webapp/"],"dynamic_cookie_tag_hex":31,"cookie_document_require_fetch_metadata":True})
     saved=h.run(method="POST",uri="/cgi-rfw/api/config",body=save_body.encode(),ip="127.0.0.1")
     saved_json={}
     try: saved_json=json.loads(saved[1])
@@ -423,7 +450,7 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     persisted_text=(h.work/"config.json").read_text()
     persisted=json.loads(persisted_text)
     fixed_keys=["key_mode","secret","dynamic_strict_sign","dynamic_sign_ratio_fail","dynamic_cookie_tag_hex","sign_enabled","replay_enabled","key_bind_ip","key_bind_ua","cookie_name","cookie_bootstrap","cookie_safe_methods","cookie_rebootstrap_document","static_ext","dynamic_allow_legacy_secret","dynamic_allow_legacy_cookie"]
-    add(out,"webui","config save keeps standard JSON remarks and indentation",None if saved_json.get("success") is True and all(k not in persisted for k in fixed_keys) and persisted.get("strict_api_paths")==["/api/"] and persisted.get("dynamic_document_paths")==["/","/portal-web/"] and persisted.get("dynamic_allow_cookie_fallback") is True and "__COMMENT_CONFIG_FORMAT" in persisted and "//" not in persisted_text and "\n  \"" in persisted_text else 500,None,"fixed fields removed; standard JSON remarks and indentation preserved")
+    add(out,"webui","config save keeps standard JSON remarks and indentation",None if saved_json.get("success") is True and all(k not in persisted for k in fixed_keys) and persisted.get("strict_api_paths")==["/api/"] and persisted.get("dynamic_document_paths")==["/","/webapp/"] and persisted.get("dynamic_allow_cookie_fallback") is True and "__COMMENT_CONFIG_FORMAT" in persisted and "//" not in persisted_text and "\n  \"" in persisted_text else 500,None,"fixed fields removed; standard JSON remarks and indentation preserved")
     bad_body=json.dumps({"sign_enabled":False})
     bad=h.run(method="POST",uri="/cgi-rfw/api/config",body=bad_body.encode(),ip="127.0.0.1")
     add(out,"webui","reject dynamic strict with sign disabled",bad[0],400,"configuration contradiction rejected")
@@ -466,9 +493,9 @@ def is_static_uri(uri: str):
 def run_saz_test(repo: Path, config_path: Path, saz: Path, out: list[Check]):
     if not saz or not saz.exists():
         out.append(Check("saz","prod.saz available","SKIP","PASS","SKIP","not supplied")); return
-    sessions=parse_saz(saz); home=next((x for x in sessions if x["method"]=="GET" and urlsplit(x["uri"]).path=="/portal-web/"),None)
+    sessions=parse_saz(saz); home=next((x for x in sessions if x["method"]=="GET" and urlsplit(x["uri"]).path=="/webapp/"),None)
     if not home:
-        out.append(Check("saz","production home found","FAIL","PASS","FAIL","no /portal-web/ session")); return
+        out.append(Check("saz","production home found","FAIL","PASS","FAIL","no /webapp/ session")); return
     cookie_header=home["headers"].get("cookie",""); m=re.search(r"(?:^|;)\s*_RFW=([^;]+)",cookie_header); old_cookie=m.group(1) if m else None
     m_ts=re.search(r"\.([0-9]{12,})$", old_cookie or "")
     base=(int(m_ts.group(1))/1000.0+0.25) if m_ts else BASE_NOW
@@ -494,7 +521,7 @@ def run_saz_test(repo: Path, config_path: Path, saz: Path, out: list[Check]):
     add(out,"saz","production sequence after dynamic replacement",403 if denied else None,None,f"sessions={exercised}, denied={denied[:3]}")
     restart=h.run(method="GET",uri=home_path,cookie=dyn_cookie,now=base+3600,accept="text/html",dest="document",response_ct=home.get("response_ct") or "text/html")
     add(out,"saz","60 minute browser restart HTML",restart[0],None,"new Cookie="+str(bool(restart[2])))
-    api=h.run(method="GET",uri="/portal-web/api/restart",cookie=dyn_cookie,now=base+3601,accept="application/json",dest="empty")
+    api=h.run(method="GET",uri="/webapp/api/restart",cookie=dyn_cookie,now=base+3601,accept="application/json",dest="empty")
     add(out,"saz","60 minute browser restart API old Cookie",api[0],403,"strict dynamic API requires new RFWDATA")
     h.close()
     add(out,"saz","static legacy profile not exercised",None,None,"dynamic-only gray release")
@@ -517,9 +544,9 @@ def main():
     run_core_tests(repo,cfg,checks); run_cookie_tests(repo,cfg,checks); run_webui_test(repo,cfg,checks); run_saz_test(repo,cfg,saz,checks); run_performance(repo,cfg,checks)
     summary={"total":len(checks),"passed":sum(x.status=="PASS" for x in checks),"failed":sum(x.status=="FAIL" for x in checks),"skipped":sum(x.status=="SKIP" for x in checks),"checks":[asdict(x) for x in checks],"config":str(cfg),"saz":str(saz) if saz else None}
     Path(args.json_out).write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# RFW v4.3.1 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
+    lines=["# RFW v4.3.2 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
     for x in checks: lines.append(f"| {x.suite} | {x.name} | `{x.observed}` | `{x.expected}` | **{x.status}** | {x.detail} |")
-    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.1 dynamic-only 严格模式要求非文档请求携带当前 dynamic RFWDATA；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 RFWDATA。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、RFWDATA 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
+    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.2 dynamic-only 严格模式要求非文档请求携带当前 dynamic RFWDATA；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 RFWDATA。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、RFWDATA 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
     Path(args.md_out).write_text("\n".join(lines)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2)); return 0 if summary["failed"]==0 else 1
 

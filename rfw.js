@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v=4.3.1"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v=4.3.2"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -24,7 +24,7 @@
   // window.__RFW__ 不能阻止本次脚本继续安装 Header Gate 客户端逻辑。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.1" }),
+      value: Object.freeze({ loaded: true, version: "4.3.2" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -233,13 +233,19 @@
           return null;
         }).then(function () {
           var secret = getSecret();
-          if (!secret) return _fetch.call(self, input, init);
+          if (!secret) return _fetch.call(self, input, init).then(function (response) {
+            if (responseRequestsRecovery(response)) requestTokenRecovery();
+            return response;
+          });
           return makeSign(secret, method, url, bodyBuf, getClockOffset()).then(function (r) {
             var h = new Headers(init.headers);
             h.set(H_DATA, r.ts + "." + r.nonce + "." + r.sign);
             init.method = method;
             init.headers = h;
-            return _fetch.call(self, input, init);
+            return _fetch.call(self, input, init).then(function (response) {
+              if (responseRequestsRecovery(response)) requestTokenRecovery();
+              return response;
+            });
           });
         }).catch(function () {
           return _fetch.call(self, input, init);
@@ -258,6 +264,7 @@
       };
       XMLHttpRequest.prototype.send = function (body) {
         var x = this;
+        watchXhrRecovery(x);
         var meta = x._rfwMeta || { method: "GET", url: "" };
         if (meta.url && !isSameOrigin(meta.url)) return _send.apply(this, arguments);
         if (x._rfwAsync === false) {
@@ -336,9 +343,39 @@
   var pendingQueue = [];     // 密钥获取期间排队的请求 resolve 函数
   var retryTimer   = null;
   var tokenInFlight = null;
+  var lastRecoveryAt = 0;
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
+
+  function requestTokenRecovery() {
+    var now = Date.now();
+    if (now - lastRecoveryAt < 1000) return;
+    lastRecoveryAt = now;
+    dynKey = null;
+    dynReady = false;
+    dynNoKey = false;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    fetchAndApplyToken();
+  }
+
+  function responseRequestsRecovery(response) {
+    try {
+      return response && response.status === 403 && response.headers &&
+        response.headers.get("X-RFW-Recover") === "token";
+    } catch (e) { return false; }
+  }
+
+  function watchXhrRecovery(x) {
+    if (!x || typeof x.addEventListener !== "function") return;
+    x.addEventListener("load", function () {
+      try {
+        if (x.status === 403 && x.getResponseHeader("X-RFW-Recover") === "token") {
+          requestTokenRecovery();
+        }
+      } catch (e) {}
+    });
+  }
 
   var DYN_COOKIE_NAME = "_RFW";
   var DYN_COOKIE_TTL = 86400;

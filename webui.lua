@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.1"
+local VERSION = "4.3.2"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -636,13 +636,13 @@ local CONFIG_HTML = [[<!DOCTYPE html>
         <label>严格 API 路径</label>
         <div class="path-tags" id="strict-api-path-tags"></div>
         <div class="path-input"><input type="text" id="strict-api-path-input" placeholder="输入路径，回车添加"><button type="button" class="btn btn-secondary" onclick="addStrictApiPath()">添加</button></div>
-        <span class="help-text" title="命中的路径始终要求 RFWDATA；留空表示所有非文档请求按严格策略处理">例如：/api/、/portal-web/portal/</span>
+        <span class="help-text" title="命中的路径始终要求 RFWDATA；留空表示所有非文档请求按严格策略处理">例如：/api/、/webapp/portal/</span>
       </div>
       <div class="form-group">
         <label>文档精确路径</label>
         <div class="path-tags" id="document-path-tags"></div>
         <div class="path-input"><input type="text" id="document-path-input" placeholder="输入路径，回车添加"><button type="button" class="btn btn-secondary" onclick="addDocumentPath()">添加</button></div>
-        <span class="help-text" title="只有明确返回 HTML 的入口才能作为文档 bootstrap 路径">例如：/、/portal-web/</span>
+        <span class="help-text" title="只有明确返回 HTML 的入口才能作为文档 bootstrap 路径">例如：/、/webapp/</span>
       </div>
     </div>
   </div>
@@ -858,7 +858,7 @@ function loadConfig(){
     setVal('cfg-sign-window',c.sign_window);
     setVal('cfg-sign-ratio-req',c.sign_ratio_req);setVal('cfg-sign-ratio-min',c.sign_ratio_min);
     strictApiData=Array.isArray(c.strict_api_paths)?c.strict_api_paths.slice():[];renderPathTags('strict-api-path-tags',strictApiData);
-    documentPathData=Array.isArray(c.dynamic_document_paths)?c.dynamic_document_paths.slice():['/','/portal-web/'];renderPathTags('document-path-tags',documentPathData);
+    documentPathData=Array.isArray(c.dynamic_document_paths)?c.dynamic_document_paths.slice():['/','/webapp/'];renderPathTags('document-path-tags',documentPathData);
     setVal('cfg-key-ttl',c.key_ttl);
     setVal('cfg-key-grace',c.key_grace);setVal('cfg-key-advance-refresh',c.key_advance_refresh);
     setVal('cfg-key-fetch-quota',c.key_fetch_quota);setVal('cfg-key-quota-window',c.key_quota_window);
@@ -1071,7 +1071,7 @@ local function handle_api_config_save()
         and (config.dynamic_allow_cookie_fallback == true)
         or (data.dynamic_allow_cookie_fallback == true)
     data.cookie_document_require_fetch_metadata = data.cookie_document_require_fetch_metadata ~= false
-    if type(data.dynamic_document_paths) ~= "table" then data.dynamic_document_paths = {"/", "/portal-web/"} end
+    if type(data.dynamic_document_paths) ~= "table" then data.dynamic_document_paths = {"/", "/webapp/"} end
     local clean_doc_paths = {}
     for _, p in ipairs(data.dynamic_document_paths) do
         if type(p) == "string" and p ~= "" and #p <= 256 then clean_doc_paths[#clean_doc_paths + 1] = p end

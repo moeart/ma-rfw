@@ -28,8 +28,8 @@ function makeContext() {
   };
   const context = {
     window, XMLHttpRequest: MockXHR,
-    document: { cookie: '', baseURI: 'http://localhost/portal-web/' },
-    location: { href: 'http://localhost/portal-web/', host: 'localhost', hostname: 'localhost' },
+    document: { cookie: '', baseURI: 'http://localhost/webapp/' },
+    location: { href: 'http://localhost/webapp/', host: 'localhost', hostname: 'localhost' },
     TextEncoder, URL, Headers, Response, ArrayBuffer, Uint8Array, DataView,
     Promise, Math, Date,
     setInterval: function () { return 1; }, clearInterval: function () {},
@@ -56,7 +56,7 @@ function makeContext() {
 
   for (const asyncValue of [true, false]) {
     const x = new context.XMLHttpRequest();
-    x.open('GET', '/portal-web/portal/DataDictController/getDevToolMd5.do', asyncValue);
+    x.open('GET', '/webapp/portal/DataDictController/getDevToolMd5.do', asyncValue);
     x.send(null);
     if (asyncValue) {
       await new Promise(resolve => setImmediate(resolve));
