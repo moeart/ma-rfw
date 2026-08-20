@@ -13,7 +13,7 @@ function makeContext(options = {}) {
   const tokenResponses = options.tokenResponses || [{
     key: 'dynamic-test-key', expires_in: 1800,
     server_time: Math.floor(Date.now() / 1000),
-    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a'
+    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.5', rfw_protocol: 'MA-RFW-1'
   }];
   let tokenIndex = 0;
   const calls = options.calls || { token: 0, business: 0 };
@@ -104,13 +104,13 @@ function makeContext(options = {}) {
   await new Promise(resolve => setImmediate(resolve));
   if (sharedCalls.token !== 1) throw new Error('same-origin Broker did not deduplicate Token requests: ' + sharedCalls.token);
 
-  // boot_id 变化必须锁定业务请求，且不再把请求交给原始 fetch。
+  // 同协议 boot_id 变化必须自动切换新 Token，不需要手动刷新。
   const bootCalls = { token: 0, business: 0 };
   const boot = makeContext({
     calls: bootCalls,
     tokenResponses: [
-      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a' },
-      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b' }
+      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.5', rfw_protocol: 'MA-RFW-1' },
+      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.5', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -119,8 +119,21 @@ function makeContext(options = {}) {
   await new Promise(resolve => setImmediate(resolve));
   let blocked = false;
   try { await boot.window.fetch('/webapp/api-after-reload', { method: 'GET' }); } catch (e) { blocked = true; }
-  if (!blocked || bootCalls.business !== 0 || bootCalls.token !== 2 || bootCalls.alert.indexOf('服务器已重启') < 0) {
-    throw new Error('boot_id reload lock failed: ' + JSON.stringify(bootCalls));
+  if (blocked || bootCalls.business !== 1 || bootCalls.token !== 2 || bootCalls.alert) {
+    throw new Error('same-protocol boot_id auto-refresh failed: ' + JSON.stringify(bootCalls));
   }
-  console.log('PASS dynamic async/sync XHR, duplicate-load Token dedupe, same-origin Broker, and boot reload lock');
+
+  // 旧服务端协议/版本必须 fail-closed，并只显示通用维护提示。
+  const oldCalls = { token: 0, business: 0 };
+  const old = makeContext({
+    calls: oldCalls,
+    tokenResponses: [{ key: 'old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'old-boot', rfw_version: '4.3.4', rfw_protocol: 'MA-RFW-1' }]
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  let oldBlocked = false;
+  try { await old.window.fetch('/webapp/api-old-server', { method: 'GET' }); } catch (e) { oldBlocked = true; }
+  if (!oldBlocked || oldCalls.business !== 0 || oldCalls.token !== 1 || oldCalls.alert !== '系统维护，请刷新页面。') {
+    throw new Error('old server protocol guard failed: ' + JSON.stringify(oldCalls));
+  }
+  console.log('PASS dynamic async/sync XHR, duplicate-load Token dedupe, same-origin Broker, boot auto-refresh, and old-protocol fail-closed');
 })().catch(err => { console.error(err); process.exit(1); });

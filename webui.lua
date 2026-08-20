@@ -1371,8 +1371,18 @@ end
 -- Token Endpoint (dynamic mode)
 -- ============================================================
 
+local PROTOCOL_VERSION = "MA-RFW-1"
+
+local function token_response(data, status)
+    data.rfw_version = VERSION
+    data.rfw_protocol = PROTOCOL_VERSION
+    return json_response(data, status)
+end
+
 local function handle_token()
     local method = ngx.req.get_method()
+    ngx.header["MA-RFW-Version"] = VERSION
+    ngx.header["MA-RFW-Protocol"] = PROTOCOL_VERSION
     if method ~= "GET" then
         return json_response({error = "method_not_allowed"}, 405)
     end
@@ -1381,7 +1391,7 @@ local function handle_token()
     local boot_id = (core and core.get_boot_id and core.get_boot_id()) or ""
     if boot_id ~= "" then ngx.header["MA-RFW-Boot-ID"] = boot_id end
     if not core or core.KEY_MODE ~= "dynamic" then
-        return json_response({key = nil, expires_in = 0, server_time = ngx.time(),
+        return token_response({key = nil, expires_in = 0, server_time = ngx.time(),
                               boot_id = boot_id,
                               quota_exhausted = true, key_mode = "dynamic",
                               strict_sign = true, dynamic_sign_ratio_fail = true,
@@ -1399,7 +1409,7 @@ local function handle_token()
     if core.check_token_rate(bind_ip, ua_h) then
         local record = core.get_key_record(bind_ip, ua_h)
         if record and record.current and record.current.expire > ngx.time() then
-            return json_response({
+            return token_response({
                 key = record.current.key,
                 expires_in = record.current.expire - ngx.time(),
                 server_time = ngx.time(),
@@ -1414,7 +1424,7 @@ local function handle_token()
                 dynamic_document_paths = config.dynamic_document_paths or {}
             })
         end
-        return json_response({
+        return token_response({
             key = nil, expires_in = 0,
             server_time = ngx.time(), boot_id = boot_id, quota_exhausted = true,
             key_mode = "dynamic",
@@ -1433,7 +1443,7 @@ local function handle_token()
     ngx.header["Pragma"] = "no-cache"
     ngx.header["X-Content-Type-Options"] = "nosniff"
 
-    return json_response({
+    return token_response({
         key = key,
         expires_in = key and math.max(0, expire - ngx.time()) or 0,
         cookie_ttl = config.cookie_ttl or 86400,

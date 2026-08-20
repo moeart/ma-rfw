@@ -368,11 +368,25 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
+  var CLIENT_VERSION = "4.3.5";
+  var CLIENT_PROTOCOL = "MA-RFW-1";
+  var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
+  var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;
   var serverBootId = tokenBroker && tokenBroker.bootId ? tokenBroker.bootId : null;
   var reloadLocked = false;
   var reloadDialogShown = false;
 
-  function lockForServerReload(nextBootId) {
+  function showMaintenancePrompt() {
+    if (reloadDialogShown) return;
+    reloadDialogShown = true;
+    var msg = "系统维护，请刷新页面。";
+    try {
+      if (typeof window.alert === "function") window.alert(msg);
+      else if (window.console) window.console.warn("[rfw.js] " + msg);
+    } catch (e) {}
+  }
+
+  function lockForServerReload(signal) {
     if (reloadLocked || (tokenBroker && tokenBroker.reloadLocked)) return;
     reloadLocked = true;
     if (tokenBroker) tokenBroker.reloadLocked = true;
@@ -381,26 +395,37 @@
     dynNoKey = true;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     pendingQueue = [];
-    if (!reloadDialogShown) {
-      reloadDialogShown = true;
-      var msg = "服务器已重启，为避免继续请求触发拦截，请刷新页面后继续。";
-      try {
-        if (typeof window.alert === "function") window.alert(msg);
-        else if (window.console) window.console.warn("[rfw.js] " + msg);
-      } catch (e) {}
+    showMaintenancePrompt();
+    if (window.console) window.console.warn("[rfw.js] protocol/server signal requires page refresh: " + signal);
+  }
+
+  function applyProtocolSignal(data) {
+    var nextVersion = data && data.rfw_version ? String(data.rfw_version) : "";
+    var nextProtocol = data && data.rfw_protocol ? String(data.rfw_protocol) : "";
+    if (nextProtocol && nextProtocol !== CLIENT_PROTOCOL) {
+      lockForServerReload("protocol=" + nextProtocol);
+      return false;
     }
-    if (window.console) window.console.warn("[rfw.js] server boot_id changed, requests paused: " + nextBootId);
+    if (nextVersion && nextVersion !== CLIENT_VERSION) {
+      lockForServerReload("version=" + nextVersion);
+      return false;
+    }
+    if (nextVersion) serverVersion = nextVersion;
+    if (nextProtocol) serverProtocol = nextProtocol;
+    if (tokenBroker) {
+      if (nextVersion) tokenBroker.version = nextVersion;
+      if (nextProtocol) tokenBroker.protocol = nextProtocol;
+    }
+    return true;
   }
 
   function applyBootSignal(data) {
     var next = data && data.boot_id ? String(data.boot_id) : "";
     if (!next) return;
-    if (serverBootId && serverBootId !== next) lockForServerReload(next);
-    if (!serverBootId) serverBootId = next;
-    if (tokenBroker) {
-      if (tokenBroker.bootId && tokenBroker.bootId !== next) lockForServerReload(next);
-      tokenBroker.bootId = next;
-    }
+    // 同协议的新 Token 代表服务器已完成 reload；直接切换到新 Key，
+    // 不把正常的 boot_id 轮换误判为需要用户刷新。
+    serverBootId = next;
+    if (tokenBroker) tokenBroker.bootId = next;
   }
 
   function isReloadLocked() { return reloadLocked || !!(tokenBroker && tokenBroker.reloadLocked); }
@@ -508,12 +533,7 @@
     dynKey    = null;
     dynReady  = false;
     pendingQueue = [];
-    if (!reloadDialogShown) {
-      reloadDialogShown = true;
-      try {
-        if (typeof window.alert === "function") window.alert("无法获取安全 Token，请刷新页面或稍后重试。");
-      } catch (e) {}
-    }
+    showMaintenancePrompt();
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(function () {
       retryTimer = null;
@@ -526,6 +546,7 @@
 
   function applyTokenData(data) {
     if (!data) return;
+    if (!applyProtocolSignal(data)) return;
     applyBootSignal(data);
     if (isReloadLocked()) return;
     if (!data.key) {
