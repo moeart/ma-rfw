@@ -424,6 +424,12 @@ def run_cookie_tests(repo: Path, config_path: Path, out: list[Check]):
 
 def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     h=Harness(repo,config_path,"dynamic")
+    public_block=(repo/"blocked.html").read_text(encoding="utf-8")
+    add(out,"webui","public block page hides firewall internals",None if "防火墙" in public_block and "重放攻击防火墙" not in public_block and "短时间内请求过于频繁" not in public_block and "请求内容未通过完整性校验" not in public_block and "查看技术细节" not in public_block else 500,None,"generic public wording")
+    debug_h=Harness(repo,config_path,"dynamic",{"debug":True})
+    debug_result=debug_h.run(uri="/api/debug-panel")
+    add(out,"webui","debug-only technical panel remains opt-in",None if debug_result[0]==403 and "id=\"rfw-debug\"" in debug_result[1] else 500,None,"debug=true panel injection")
+    debug_h.close()
     result=h.run(uri="/cgi-rfw/token",now=BASE_NOW)
     try: data=json.loads(result[1])
     except Exception: data={}

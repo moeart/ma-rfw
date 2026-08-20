@@ -3,34 +3,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MA-RFW 拦截警告</title>
-    <style>body{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f0f2f5;font-family:sans-serif;padding:16px}.card{max-width:480px;width:100%;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1);padding:24px}.code{font-size:36px;font-weight:700;color:#d32f2f}.label{font-size:18px;font-weight:500;color:#37474f;margin-left:10px}h1{font-size:20px;margin:8px 0 4px}p{font-size:15px;color:#546e7a;margin-bottom:12px}ul{background:#f5f7fa;border-radius:6px;padding:8px 16px;list-style-position:inside;font-size:14px;margin-bottom:14px}.btn{background:none;border:none;color:#546e7a;cursor:pointer;font-size:13px;padding:4px 8px}#rfw-debug{display:none;margin-top:12px;background:#fafbfc;border:1px solid #e0e4e8;border-radius:6px;padding:12px;font-family:monospace;font-size:12px;overflow-x:auto}#rfw-debug h3{margin:0 0 8px 0;font-size:14px;color:#37474f;font-weight:600}#rfw-debug table{width:100%;border-collapse:collapse}#rfw-debug td{padding:4px 8px;border-bottom:1px solid #edf0f3;vertical-align:top;word-break:break-all}#rfw-debug tr:last-child td{border-bottom:none}#rfw-debug .k{color:#78909c;font-weight:500;min-width:100px;white-space:nowrap;padding-right:12px;vertical-align:top}#rfw-debug .v{color:#263238;word-break:break-all}</style>
+    <title>防火墙拦截提示</title>
+    <style>body{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f0f2f5;font-family:sans-serif;padding:16px}.card{max-width:480px;width:100%;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1);padding:24px}.code{font-size:36px;font-weight:700;color:#d32f2f}.label{font-size:18px;font-weight:500;color:#37474f;margin-left:10px}h1{font-size:20px;margin:8px 0 4px}p{font-size:15px;color:#546e7a;margin-bottom:12px}#rfw-debug{display:none;margin-top:12px;background:#fafbfc;border:1px solid #e0e4e8;border-radius:6px;padding:12px;font-family:monospace;font-size:12px;overflow-x:auto}#rfw-debug h3{margin:0 0 8px 0;font-size:14px;color:#37474f;font-weight:600}#rfw-debug table{width:100%;border-collapse:collapse}#rfw-debug td{padding:4px 8px;border-bottom:1px solid #edf0f3;vertical-align:top;word-break:break-all}#rfw-debug tr:last-child td{border-bottom:none}#rfw-debug .k{color:#78909c;font-weight:500;min-width:100px;white-space:nowrap;padding-right:12px;vertical-align:top}#rfw-debug .v{color:#263238;word-break:break-all}</style>
   </head>
   <body>
     <div class="card" id="card">
-      <div><span class="code">403</span><span class="label">萌艺科技重放攻击防火墙</span></div>
+      <div><span class="code">403</span><span class="label">防火墙</span></div>
       <h1>访问被拒绝</h1>
-      <p>您的请求触发了访问频率或请求合法性检查。</p>
-      <ul><li>短时间内请求过于频繁</li><li>请求内容未通过完整性校验</li></ul>
-      <button class="btn" id="toggleDebug">查看技术细节</button>
+      <p>请求未通过安全检查，请稍后重试。</p>
     </div>
-    <script>
-      document.getElementById('toggleDebug').onclick = function() {
-        var card = document.getElementById('card');
-        var debug = document.getElementById('rfw-debug');
-        if (debug && card && debug.parentNode !== card) {
-          card.appendChild(debug);
-        }
-        if (debug) {
-          if (debug.style.display === 'block') {
-            debug.style.display = 'none';
-            this.textContent = '查看日志';
-          } else {
-            debug.style.display = 'block';
-            this.textContent = '收起日志';
-          }
-        }
-      };
-    </script>
   </body>
 </html>
