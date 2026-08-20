@@ -13,7 +13,7 @@ function makeContext(options = {}) {
   const tokenResponses = options.tokenResponses || [{
     key: 'dynamic-test-key', expires_in: 1800,
     server_time: Math.floor(Date.now() / 1000),
-    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.5', rfw_protocol: 'MA-RFW-1'
+    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1'
   }];
   let tokenIndex = 0;
   const calls = options.calls || { token: 0, business: 0 };
@@ -23,14 +23,17 @@ function makeContext(options = {}) {
     __RFW__: { loaded: true, forged: true },
     __RFW_MODE__: 'static',
     __RFW_TOKEN__: 'forged-static-secret',
-    fetch: function (url) {
+    fetch: function (url, init) {
       if (String(url).indexOf('/cgi-rfw/token') === 0) {
         calls.token++;
         const token = tokenResponses[Math.min(tokenIndex++, tokenResponses.length - 1)];
         return Promise.resolve({ ok: true, json: () => Promise.resolve(token) });
       }
       calls.business++;
-      return Promise.resolve({ ok: true, headers: { get() { return null; } } });
+      if (typeof options.businessResponse === 'function') {
+        return Promise.resolve(options.businessResponse({ url: String(url), init }));
+      }
+      return Promise.resolve(options.businessResponse || { ok: true, headers: { get() { return null; } } });
     },
     addEventListener: function (name, fn) {
       (listeners[name] || (listeners[name] = [])).push(fn);
@@ -109,8 +112,8 @@ function makeContext(options = {}) {
   const boot = makeContext({
     calls: bootCalls,
     tokenResponses: [
-      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.5', rfw_protocol: 'MA-RFW-1' },
-      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.5', rfw_protocol: 'MA-RFW-1' }
+      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' },
+      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -121,6 +124,26 @@ function makeContext(options = {}) {
   try { await boot.window.fetch('/webapp/api-after-reload', { method: 'GET' }); } catch (e) { blocked = true; }
   if (blocked || bootCalls.business !== 1 || bootCalls.token !== 2 || bootCalls.alert) {
     throw new Error('same-protocol boot_id auto-refresh failed: ' + JSON.stringify(bootCalls));
+  }
+
+  // recovery 403 必须清空 Broker 旧缓存并真正获取第二个 Token。
+  const recoveryCalls = { token: 0, business: 0 };
+  const recovery = makeContext({
+    calls: recoveryCalls,
+    tokenResponses: [
+      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' },
+      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' }
+    ],
+    businessResponse: () => ({ ok: false, status: 403, headers: { get(name) { return name === 'MA-RFW-Recover' ? 'token' : null; } } })
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  await recovery.window.fetch('/webapp/recovery-first', { method: 'GET' });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  await recovery.window.fetch('/webapp/recovery-second', { method: 'GET' });
+  await new Promise(resolve => setImmediate(resolve));
+  if (recoveryCalls.token !== 2 || recoveryCalls.business !== 2) {
+    throw new Error('MA-RFW-Recover did not force fresh Token: ' + JSON.stringify(recoveryCalls));
   }
 
   // 旧服务端协议/版本必须 fail-closed，并只显示通用维护提示。

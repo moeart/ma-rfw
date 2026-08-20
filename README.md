@@ -1,6 +1,6 @@
-# MA-RFW — MoeArt Replay Firewall v4.3.5
+# MA-RFW — MoeArt Replay Firewall v4.3.6
 
-针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.5 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
+针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.6 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
 
 ## 特性
 
@@ -19,7 +19,7 @@
 - 历史统计图表（拒绝趋势 + 请求量 + 原因分布）
 - 零外部依赖（纯 Lua + ngx.shared.DICT）
 
-> v4.3.5 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 MA-RFW-Data；`dynamic_allow_cookie_fallback=false`，删除 MA-RFW-Data 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
+> v4.3.6 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 MA-RFW-Data；`dynamic_allow_cookie_fallback=false`，删除 MA-RFW-Data 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
 
 ## 文件结构
 
@@ -144,7 +144,7 @@ nginx -s reload
 
 ### Dynamic-only 密钥策略
 
-v4.3.5 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
+v4.3.6 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
 
 ### 签名请求（优先）
 
@@ -252,15 +252,15 @@ Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 1
 
 ## 测试
 
-v4.3.5 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、MA-RFW-Data 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
+v4.3.6 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `脱敏回放文件` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、MA-RFW-Data 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
 
 ```bash
-cd replayfirewall_hardened_v4_3_5
+cd replayfirewall_hardened_v4_3_6
 python3 tools/rfw_v4_test.py \
   --config config.json \
-  --saz /path/to/prod.saz \
-  --json-out /tmp/rfw_v4_3_5_hardened_test.json \
-  --md-out /tmp/rfw_v4_3_5_hardened_test.md
+  --saz /path/to/脱敏回放文件 \
+  --json-out /tmp/rfw_v4_3_6_hardened_test.json \
+  --md-out /tmp/rfw_v4_3_6_hardened_test.md
 ```
 
-测试通过标准为 `failed=0`。当前 v4.3.5 dynamic-only 基线为 **53/53 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 MA-RFW-Data、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.5 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。
+测试通过标准为 `failed=0`。当前 v4.3.6 dynamic-only 基线为 **55/55 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR、Token recovery 强制刷新、旧协议 fail-closed 与全局变量篡改测试通过；覆盖删除 MA-RFW-Data、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.6 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。

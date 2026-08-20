@@ -55,7 +55,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.5 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.6 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true

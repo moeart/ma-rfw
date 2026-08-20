@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.5"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.6"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -46,7 +46,7 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.5" }),
+      value: Object.freeze({ loaded: true, version: "4.3.6" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -368,7 +368,7 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
-  var CLIENT_VERSION = "4.3.5";
+  var CLIENT_VERSION = "4.3.6";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
   var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;
@@ -439,6 +439,13 @@
     dynReady = false;
     dynNoKey = false;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    // MA-RFW-Recover 表示当前签名对应的 Key 已被服务端拒绝；
+    // 必须丢弃同源 Broker 的 lastData，否则 fetchAndApplyToken()
+    // 会命中仍在 TTL 内的旧缓存，造成“刷新 Token 后仍连续 403”。
+    if (tokenBroker) {
+      tokenBroker.lastData = null;
+      tokenBroker.lastExpiresAt = 0;
+    }
     fetchAndApplyToken();
   }
 
