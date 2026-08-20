@@ -434,7 +434,7 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     try: data=json.loads(result[1])
     except Exception: data={}
     add(out,"webui","dynamic token endpoint JSON",result[0],200,"body keys="+str(sorted(data.keys())))
-    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 else 500,None,"dynamic-only/strict/fallback/tag/boot_id")
+    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.5" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
     page=h.run(uri="/cgi-rfw/config",ip="127.0.0.1")
     add(out,"webui","version is v4.3.5",None if "<span>v4.3.5</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
     log_page=h.run(uri="/cgi-rfw/logs",ip="127.0.0.1")
