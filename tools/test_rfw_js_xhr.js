@@ -81,10 +81,10 @@ function makeContext(options = {}) {
       await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
     }
-    const value = x.headers.RFWDATA;
-    if (!value) throw new Error('RFWDATA missing for async=' + asyncValue);
+    const value = x.headers['MA-RFW-Data'];
+    if (!value) throw new Error('MA-RFW-Data missing for async=' + asyncValue);
     if (!/^\d+\.[\w-]+\.[0-9a-f]{64}$/.test(value)) {
-      throw new Error('invalid RFWDATA for async=' + asyncValue);
+      throw new Error('invalid MA-RFW-Data for async=' + asyncValue);
     }
     if (!x.sent) throw new Error('native XHR send was not called');
   }

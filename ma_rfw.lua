@@ -5,9 +5,9 @@
 -- 存储后端: ngx.shared.DICT (nginx 共享内存, 零网络开销, 零外部依赖)
 -- nginx.conf 必须声明: lua_shared_dict rfw 64m;
 --
--- 规则(默认 RFWDATA-only):
---   1. 请求带 RFWDATA → 严格校验: ts 时效 → nonce 一次性 → body 哈希 → HMAC 签名
---   2. 受保护请求缺少 RFWDATA → 直接拒绝；仅显式配置兼容例外时才进入 dynamic Cookie 校验
+-- 规则(默认 MA-RFW-Data-only):
+--   1. 请求带 MA-RFW-Data → 严格校验: ts 时效 → nonce 一次性 → body 哈希 → HMAC 签名
+--   2. 受保护请求缺少 MA-RFW-Data → 直接拒绝；仅显式配置兼容例外时才进入 dynamic Cookie 校验
 --   3. 文档 bootstrap 只由精确文档路径或 Nginx 显式变量控制
 local core = _G.ma_rfw_core
 if core then
@@ -55,7 +55,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.4 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.5 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true
@@ -651,7 +651,7 @@ local function debug_panel(reason, detail)
         { "uri", ngx_var.uri or "" },
         { "request_uri", ngx_var.request_uri or "" },
         { "host", ngx_var.http_host or "" },
-        { "http_rfwdata", trunc(ngx_var.http_rfwdata, 300) or "(nil)" },
+        { "http_ma_rfw_data", trunc(ngx_var.http_ma_rfw_data, 300) or "(nil)" },
         { "http_cookie", trunc(ngx_var.http_cookie, 500) or "(nil)" },
     }
     if detail then for i = 1, #detail do rows[#rows + 1] = detail[i] end end
@@ -681,7 +681,7 @@ local function deny(reason, detail)
     ngx.status = ngx.HTTP_FORBIDDEN
     ngx.header["Content-Type"] = "text/html; charset=utf-8"
     if reason == "dynamic-key-missing" then
-        ngx.header["X-RFW-Recover"] = "token"
+        ngx.header["MA-RFW-Recover"] = "token"
     end
     if DEBUG then
         local panel = debug_panel(reason, detail)
@@ -1067,7 +1067,7 @@ end
 local function is_static()
     local m = ngx_req.get_method()
     if m ~= "GET" and m ~= "HEAD" then return false end
-    if ngx_var.http_rfwdata then return false end
+    if ngx_var.http_ma_rfw_data then return false end
     local u = ngx_var.uri or ""
     local ext = u:match("(%.[%w]+)$")
     if ext then return static_ext_set[ext:lower()] == true end
@@ -1076,10 +1076,10 @@ end
 
 local function verify_sign()
     local ip = ngx_var.remote_addr or ""
-    local raw = ngx_var.http_rfwdata
+    local raw = ngx_var.http_ma_rfw_data
     local ua = ngx_var.http_user_agent or ""
     local d = DEBUG and {} or nil
-    detail_add(d, "RFWDATA", raw or "")
+    detail_add(d, "MA-RFW-Data", raw or "")
     detail_add(d, "method", ngx_req.get_method())
     detail_add(d, "request_uri", ngx_var.request_uri or "")
     if not raw then
@@ -1235,7 +1235,7 @@ function _M.run()
         return deny("dynamic-sign-disabled")
     end
     local headerless_cookie_fallback = false
-    if KEY_MODE == "dynamic" and DYN_STRICT_SIGN and dynamic_header_required() and not ngx_var.http_rfwdata then
+    if KEY_MODE == "dynamic" and DYN_STRICT_SIGN and dynamic_header_required() and not ngx_var.http_ma_rfw_data then
         -- Controller/.do/API 仍不能仅凭文档头、Accept 或 MIME 放行。
         -- 但已有 dynamic _RFW Cookie 要继续进入下面的完整校验链，
         -- 以兼容少量同步 XHR；无 Cookie 仍严格拒绝。
@@ -1250,7 +1250,7 @@ function _M.run()
         rfw_debug("dynamic headerless Cookie fallback uri=" .. uri)
     end
 
-    if SIGN_ENABLED and ngx_var.http_rfwdata then
+    if SIGN_ENABLED and ngx_var.http_ma_rfw_data then
         local result = verify_sign()
         if result ~= "treat_as_unsigned" then
             return result
@@ -1325,7 +1325,7 @@ function _M.run()
         if KEY_MODE == "dynamic" and cookie_document_request(ngx_req.get_method()) then
             -- Dynamic 文档只允许进入页面 bootstrap；不在 access 阶段根据
             -- Accept/URI 猜测并发 Set-Cookie。新版 rfw.js 会从 token 端点
-            -- 获取 dynamic key 并在浏览器端生成 Cookie，API 仍要求 RFWDATA。
+            -- 获取 dynamic key 并在浏览器端生成 Cookie，API 仍要求 MA-RFW-Data。
             incr_stat("cookie_bootstrap_document", 1)
             return
         end
@@ -1367,7 +1367,7 @@ function _M.run()
             if t and cookie_key_record_missing and cookie_document_request(ngx_req.get_method()) then
                 -- 浏览器重启后可能只保留了旧动态 Cookie，而 shared dict 中
                 -- 的动态 key record 已经过期。对明确的 HTML 文档 GET/HEAD
-                -- 重新 bootstrap；后续 API 仍必须使用新 Cookie 或 RFWDATA。
+                -- 重新 bootstrap；后续 API 仍必须使用新 Cookie 或 MA-RFW-Data。
                 -- 仅允许文档重新进入 bootstrap；不在 access 阶段发 Cookie。
                 -- 浏览器随后通过 /cgi-rfw/token + rfw.js 生成新 dynamic Cookie。
                 incr_stat("cookie_rebootstrap", 1)

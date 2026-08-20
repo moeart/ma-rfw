@@ -1,6 +1,6 @@
 {
   "__COMMENT_CONFIG_FORMAT": "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
-  "__COMMENT_RELEASE": "Replay Firewall 发布版本：v4.3.4。请与 Lua、WebUI、rfw.js 使用同一发布包。",
+  "__COMMENT_RELEASE": "Replay Firewall 发布版本：v4.3.5。请与 Lua、WebUI、rfw.js 使用同一发布包。",
   "__COMMENT_DYNAMIC_DOCUMENT_PATHS": "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
   "dynamic_document_paths": [
     "/",
@@ -30,7 +30,7 @@
   "cookie_missing_max": 50,
   "cookie_missing_ttl": 86400,
 
-  "__COMMENT_SIGN": "RFWDATA 时间窗口和签名比例异常检测。",
+  "__COMMENT_SIGN": "MA-RFW-Data 时间窗口和签名比例异常检测。",
   "sign_window": 60,
   "sign_ratio_req": 10,
   "sign_ratio_min": 0.5,

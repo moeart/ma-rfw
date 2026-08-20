@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.4"
+local VERSION = "4.3.5"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -20,13 +20,13 @@ local FIXED_CONFIG_KEYS = {
 }
 local CONFIG_COMMENT_FIELDS = {
     __COMMENT_CONFIG_FORMAT = "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
-    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.4。请与 Lua、WebUI、rfw.js 使用同一发布包。",
+    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.5。请与 Lua、WebUI、rfw.js 使用同一发布包。",
     __COMMENT_DYNAMIC_DOCUMENT_PATHS = "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
     __COMMENT_STRICT_API_PATHS = "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
     __COMMENT_DYNAMIC_KEY = "dynamic 密钥生命周期与发放限制。",
     __COMMENT_COOKIE_FALLBACK = "Cookie fallback 默认关闭；WebUI 不显示此开关，开启后也只允许安全读请求。",
     __COMMENT_COOKIE_REPLAY = "Cookie 时效、会话序号和重放限制；安全方法同值最多 8 次。",
-    __COMMENT_SIGN = "RFWDATA 时间窗口和签名比例异常检测。",
+    __COMMENT_SIGN = "MA-RFW-Data 时间窗口和签名比例异常检测。",
     __COMMENT_SEQUENCE = "Cookie 会话序号与缓存。",
     __COMMENT_REPLAY = "请求重放检测固定开启；这里只调整阈值和二次校验窗口。",
     __COMMENT_FAILURE = "失败计数与 IP 封禁。",
@@ -591,7 +591,7 @@ local CONFIG_HTML = [[<!DOCTYPE html>
     <h3>签名校验</h3>
     <div class="form-row">
       <div class="form-group">
-        <label title="RFWDATA 时间戳允许的最大偏差">签名时窗（秒）</label>
+        <label title="MA-RFW-Data 时间戳允许的最大偏差">签名时窗（秒）</label>
         <input type="number" id="cfg-sign-window" value="60">
         <span class="help-text" title="请求签名超过此时间范围会被拒绝">控制请求签名的新鲜度</span>
       </div>
@@ -605,7 +605,7 @@ local CONFIG_HTML = [[<!DOCTYPE html>
       <div class="form-group">
         <label title="低于该比例会进入拒绝和封禁链">最低签名比例</label>
         <input type="text" id="cfg-sign-ratio-min" value="0.5">
-        <span class="help-text" title="0.5 表示至少一半受保护请求应携带 RFWDATA">建议保持 0.5 或更高</span>
+        <span class="help-text" title="0.5 表示至少一半受保护请求应携带 MA-RFW-Data">建议保持 0.5 或更高</span>
       </div>
       <div class="form-group"></div>
     </div>
@@ -657,7 +657,7 @@ local CONFIG_HTML = [[<!DOCTYPE html>
         <label>严格 API 路径</label>
         <div class="path-tags" id="strict-api-path-tags"></div>
         <div class="path-input"><input type="text" id="strict-api-path-input" placeholder="输入路径，回车添加"><button type="button" class="btn btn-secondary" onclick="addStrictApiPath()">添加</button></div>
-        <span class="help-text" title="命中的路径始终要求 RFWDATA；留空表示所有非文档请求按严格策略处理">例如：/api/、/webapp/portal/</span>
+        <span class="help-text" title="命中的路径始终要求 MA-RFW-Data；留空表示所有非文档请求按严格策略处理">例如：/api/、/webapp/portal/</span>
       </div>
       <div class="form-group">
         <label>文档精确路径</label>
@@ -698,7 +698,7 @@ local CONFIG_HTML = [[<!DOCTYPE html>
       <div class="form-group">
         <label title="文档重新引导是否必须携带 Fetch Metadata">文档重新引导 Fetch Metadata</label>
         <select id="cfg-cookie-document-require-fetch"><option value="false">兼容 Firefox/urllib</option><option value="true">严格要求 document</option></select>
-        <span class="help-text" title="只影响明确文档入口，不会放宽 API 或 Controller">API 仍然需要 RFWDATA</span>
+        <span class="help-text" title="只影响明确文档入口，不会放宽 API 或 Controller">API 仍然需要 MA-RFW-Data</span>
       </div>
       <div class="form-group"></div>
     </div>
@@ -1379,7 +1379,7 @@ local function handle_token()
 
     local core = _G.ma_rfw_core
     local boot_id = (core and core.get_boot_id and core.get_boot_id()) or ""
-    if boot_id ~= "" then ngx.header["X-RFW-Boot-ID"] = boot_id end
+    if boot_id ~= "" then ngx.header["MA-RFW-Boot-ID"] = boot_id end
     if not core or core.KEY_MODE ~= "dynamic" then
         return json_response({key = nil, expires_in = 0, server_time = ngx.time(),
                               boot_id = boot_id,

@@ -11,11 +11,11 @@
  * 签名格式(与 nginx 端完全一致):
  *   sign = HMAC-SHA256(secret, method + "|" + path?query + "|" + sha256hex(body) + "|" + ts + "|" + nonce)
  *   body 为空时 sha256hex("")
- * 发送时以单头融合: RFWDATA = ts + "." + nonce + "." + sign
+ * 发送时以单头融合: MA-RFW-Data = ts + "." + nonce + "." + sign
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.4"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.5"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -46,12 +46,12 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.4" }),
+      value: Object.freeze({ loaded: true, version: "4.3.5" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
 
-  var H_DATA = "RFWDATA";
+  var H_DATA = "MA-RFW-Data";
   var enc = new TextEncoder();
   var counter = 0;
   var useSubtle = !!(window.crypto && window.crypto.subtle);
@@ -143,7 +143,7 @@
   }
 
   // 同步 XHR 不能等待 crypto.subtle Promise，因此使用同一套纯 JS
-  // SHA-256/HMAC 实现同步生成 RFWDATA。仅用于少量同步请求。
+  // SHA-256/HMAC 实现同步生成 MA-RFW-Data。仅用于少量同步请求。
   function makeSignSync(secretStr, method, url, bodyBuf, clockOffset) {
     var ts = Math.floor(Date.now() / 1000) + (clockOffset || 0);
     var nonce = newNonce();
@@ -289,7 +289,7 @@
         if (isReloadLocked()) return;
         if (x._rfwAsync === false) {
           // 同步 XHR 不能等待异步 crypto.subtle，但 GET/字符串/二进制
-          // 请求体可以用纯 JS 同步 HMAC 生成 RFWDATA。若 dynamic key
+          // 请求体可以用纯 JS 同步 HMAC 生成 MA-RFW-Data。若 dynamic key
           // 尚未就绪或 body 类型无法同步序列化，则直接阻止本次发送；
           // 不把未签名请求交给服务端触发连续 403。
           try {
@@ -420,7 +420,7 @@
   function responseRequestsRecovery(response) {
     try {
       return response && response.status === 403 && response.headers &&
-        response.headers.get("X-RFW-Recover") === "token";
+        response.headers.get("MA-RFW-Recover") === "token";
     } catch (e) { return false; }
   }
 
@@ -428,7 +428,7 @@
     if (!x || typeof x.addEventListener !== "function") return;
     x.addEventListener("load", function () {
       try {
-        if (x.status === 403 && x.getResponseHeader("X-RFW-Recover") === "token") {
+        if (x.status === 403 && x.getResponseHeader("MA-RFW-Recover") === "token") {
           requestTokenRecovery();
         }
       } catch (e) {}

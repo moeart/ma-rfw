@@ -1,6 +1,6 @@
-# MA-RFW — MoeArt Replay Firewall v4.3.4
+# MA-RFW — MoeArt Replay Firewall v4.3.5
 
-针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.4 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
+针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.5 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
 
 ## 特性
 
@@ -19,7 +19,7 @@
 - 历史统计图表（拒绝趋势 + 请求量 + 原因分布）
 - 零外部依赖（纯 Lua + ngx.shared.DICT）
 
-> v4.3.4 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 RFWDATA；`dynamic_allow_cookie_fallback=false`，删除 RFWDATA 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
+> v4.3.5 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 MA-RFW-Data；`dynamic_allow_cookie_fallback=false`，删除 MA-RFW-Data 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
 
 ## 文件结构
 
@@ -144,11 +144,11 @@ nginx -s reload
 
 ### Dynamic-only 密钥策略
 
-v4.3.4 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
+v4.3.5 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
 
 ### 签名请求（优先）
 
-前端每请求生成 `RFWDATA = ts.nonce.sign`，nginx 严格校验：
+前端每请求生成 `MA-RFW-Data = ts.nonce.sign`，nginx 严格校验：
 
 ```
 sign = HMAC-SHA256(key, METHOD|request_uri|sha256hex(body)|ts|nonce)
@@ -158,19 +158,19 @@ sign = HMAC-SHA256(key, METHOD|request_uri|sha256hex(body)|ts|nonce)
 
 校验链：`ts` 时效 → `nonce` 一次性（原子去重）→ `body` 哈希 → HMAC 比对（常量时间）。任一失败 → 403 + 记失败，窗口内满 `fail_max` 次封禁 IP。
 
-dynamic-only 严格模式下，非文档请求默认要求当前 dynamic RFWDATA；前端异步和同步 XHR 都必须在发送前生成 RFWDATA。`dynamic_allow_cookie_fallback=false` 时，密钥未就绪或请求体无法同步序列化不会进入 Cookie 兜底，服务端直接拒绝。只有 `dynamic_document_paths` 精确匹配的 GET/HEAD，或 Nginx exact location 显式设置 `$rfw_document 1` 的请求，才可在没有 RFWDATA 和没有 `_RFW` 时进入文档 bootstrap。默认兼容 Firefox、Python urllib 和旧代理链，即使缺少 `Sec-Fetch-Dest` 也能访问已配置的文档入口；API、Controller、`.do` 和常见版本 API 不接受伪造文档头。设置 `cookie_document_require_fetch_metadata=true` 后才额外要求 `Sec-Fetch-Dest: document`。
+dynamic-only 严格模式下，非文档请求默认要求当前 dynamic MA-RFW-Data；前端异步和同步 XHR 都必须在发送前生成 MA-RFW-Data。`dynamic_allow_cookie_fallback=false` 时，密钥未就绪或请求体无法同步序列化不会进入 Cookie 兜底，服务端直接拒绝。只有 `dynamic_document_paths` 精确匹配的 GET/HEAD，或 Nginx exact location 显式设置 `$rfw_document 1` 的请求，才可在没有 MA-RFW-Data 和没有 `_RFW` 时进入文档 bootstrap。默认兼容 Firefox、Python urllib 和旧代理链，即使缺少 `Sec-Fetch-Dest` 也能访问已配置的文档入口；API、Controller、`.do` 和常见版本 API 不接受伪造文档头。设置 `cookie_document_require_fetch_metadata=true` 后才额外要求 `Sec-Fetch-Dest: document`。
 
 ### 文档识别与 Cookie 发送时机
 
-v4.3 将“是否允许文档 bootstrap”和“是否把待刷新的 Cookie 写入响应”拆成两个阶段。access 阶段只使用 `dynamic_document_paths` 精确路径白名单或 Nginx `$rfw_document 1` 显式标记；它不会使用 `Accept`、尾斜杠或 `Sec-Fetch-Dest` 作为安全放行条件。`/api/`、`/graphql`、`/vN/`、`Controller/`、`.do` 等路径在 Header Gate 中始终要求 dynamic RFWDATA。只有管理员在配置文件中显式开启 `dynamic_allow_cookie_fallback` 时，少量同步的 GET/HEAD/OPTIONS 请求才可改由已有有效 dynamic `_RFW` Cookie 进入完整 Cookie 校验；POST/PUT/PATCH/DELETE 即使开启该项也必须携带 RFWDATA。伪造文档请求头不能绕过该要求。
+v4.3 将“是否允许文档 bootstrap”和“是否把待刷新的 Cookie 写入响应”拆成两个阶段。access 阶段只使用 `dynamic_document_paths` 精确路径白名单或 Nginx `$rfw_document 1` 显式标记；它不会使用 `Accept`、尾斜杠或 `Sec-Fetch-Dest` 作为安全放行条件。`/api/`、`/graphql`、`/vN/`、`Controller/`、`.do` 等路径在 Header Gate 中始终要求 dynamic MA-RFW-Data。只有管理员在配置文件中显式开启 `dynamic_allow_cookie_fallback` 时，少量同步的 GET/HEAD/OPTIONS 请求才可改由已有有效 dynamic `_RFW` Cookie 进入完整 Cookie 校验；POST/PUT/PATCH/DELETE 即使开启该项也必须携带 MA-RFW-Data。伪造文档请求头不能绕过该要求。
 
 对于已经通过校验、需要刷新 Cookie 的安全 GET/HEAD，RFW 在 access 阶段只登记 pending Cookie。header_filter 阶段再读取 upstream 的响应状态和 `Content-Type`：仅当状态小于 400 且 MIME 为 `text/html`（允许参数，如 `text/html; charset=UTF-8`）时，才真正写出 `Set-Cookie`；JSON、JavaScript、图片、错误页不会收到文档 Cookie。**MIME 是响应写入确认，不是 access 放行依据。**
 
-### RFWDATA-only 与兼容例外
+### MA-RFW-Data-only 与兼容例外
 
 - 默认按 IP 统计签名占比，低于阈值的受保护请求进入 `sign-ratio-low` 拒绝和封禁链；静态扩展名资源不参与该比例统计。
-- 带有效 dynamic RFWDATA 的请求跳过 `_RFW` Cookie 校验，但仍完成 Header 的时间、nonce、body、URI、方法和绑定检查。
-- 默认无 RFWDATA 的受保护请求直接拒绝；仅当管理员显式开启 `dynamic_allow_cookie_fallback` 时，才对已有 dynamic `_RFW` 执行 HMAC、ts 新鲜度、会话序号、有限重放、比例和封禁检查。
+- 带有效 dynamic MA-RFW-Data 的请求跳过 `_RFW` Cookie 校验，但仍完成 Header 的时间、nonce、body、URI、方法和绑定检查。
+- 默认无 MA-RFW-Data 的受保护请求直接拒绝；仅当管理员显式开启 `dynamic_allow_cookie_fallback` 时，才对已有 dynamic `_RFW` 执行 HMAC、ts 新鲜度、会话序号、有限重放、比例和封禁检查。
 - static 密钥、旧 secret、旧 Cookie 和旧三段式格式均不再进入兼容链。
 
 ### 静态资源
@@ -179,13 +179,13 @@ GET/HEAD 且扩展名在静态表 → 跳过签名/比例统计，只做封禁�
 
 ### 前端动态启动与 Cookie 保活
 
-dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。同一 Window 重复加载脚本会被 `__RFW_RUNTIME__` 保护，同源主窗口与 iframe 通过内部 Token Broker 共享 in-flight Token 请求，Token 刷新 Timer 和 Cookie 刷新 Interval 各只保留一套。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。Key 记录同时持久化到 `data/rfw_key_records.json`。每次 Nginx reload/restart 的 `init_by_lua` 阶段会生成新的 `boot_id`；`/cgi-rfw/token` 返回该标识。前端发现 boot_id 变化后会暂停所有同源业务请求并提示“服务器已重启，请刷新页面后继续”，不再用旧 Key 连续发送请求，避免触发误拦截和 IP ban。若 Token 响应没有 `boot_id`，说明线上仍是旧 WebUI 或旧发布包，不能视为 reload 防护已部署。若服务端在恢复窗口内仍返回 `dynamic-key-missing`，响应会带 `X-RFW-Recover: token`；同一业务请求不会被自动重复提交。
+dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。同一 Window 重复加载脚本会被 `__RFW_RUNTIME__` 保护，同源主窗口与 iframe 通过内部 Token Broker 共享 in-flight Token 请求，Token 刷新 Timer 和 Cookie 刷新 Interval 各只保留一套。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。Key 记录同时持久化到 `data/rfw_key_records.json`。每次 Nginx reload/restart 的 `init_by_lua` 阶段会生成新的 `boot_id`；`/cgi-rfw/token` 返回该标识。前端发现 boot_id 变化后会暂停所有同源业务请求并提示“服务器已重启，请刷新页面后继续”，不再用旧 Key 连续发送请求，避免触发误拦截和 IP ban。若 Token 响应没有 `boot_id`，说明线上仍是旧 WebUI 或旧发布包，不能视为 reload 防护已部署。若服务端在恢复窗口内仍返回 `dynamic-key-missing`，响应会带 `MA-RFW-Recover: token`；同一业务请求不会被自动重复提交。
 
 Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 180 秒内，缺少 Key 的请求仍然返回 403，但不计入 IP 失败/封禁链，避免 shared dict 初始化期间误 ban；超过恢复宽限后，真正的缺 Key 会重新进入失败链。GET、HEAD、OPTIONS 可以在同一页面并发期间复用同一合法 Cookie，但同值安全请求最多 8 次；POST/PUT/PATCH/DELETE 会按 `cookie_replay_window` 和 `cookie_replay_max` 执行更严格的同值重放限制。已通过 HMAC 的过期 Cookie 只有安全文档 GET/HEAD 可以无感刷新；浏览器重启后 dynamic key record 完全过期时，也只有 `dynamic_document_paths` 或 exact `$rfw_document` 入口允许重新 bootstrap。API、Controller、`.do`、写请求和非文档 GET 不享受该重引导。待刷新的 Cookie 仍需等 upstream HTML 响应在 `header_filter` 中确认后才写出。设置 `cookie_document_require_fetch_metadata=true` 可进一步收紧为必须携带 `Sec-Fetch-Dest=document`。
 
 ## 配置说明（config.json）
 
-配置文件采用标准 JSON；所有以 `__COMMENT_` 开头的字段都是中文备注，运行时、WebUI 和测试工具会在载入配置后忽略这些备注字段。WebUI 保存时使用 2 个空格缩进写回完整 JSON，不会压缩成单行。dynamic-only、RFWDATA 严格校验、IP/UA 绑定、`_RFW` Cookie 名称、Cookie 安全方法、Bootstrap、重放检测开关、共享字典名称以及 HMAC 标签长度都属于代码固定策略，不再写入 `config.json`。如果手工重新加入这些固定字段，Lua 会直接报配置错误。
+配置文件采用标准 JSON；所有以 `__COMMENT_` 开头的字段都是中文备注，运行时、WebUI 和测试工具会在载入配置后忽略这些备注字段。WebUI 保存时使用 2 个空格缩进写回完整 JSON，不会压缩成单行。dynamic-only、MA-RFW-Data 严格校验、IP/UA 绑定、`_RFW` Cookie 名称、Cookie 安全方法、Bootstrap、重放检测开关、共享字典名称以及 HMAC 标签长度都属于代码固定策略，不再写入 `config.json`。如果手工重新加入这些固定字段，Lua 会直接报配置错误。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -195,14 +195,14 @@ Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 1
 | `key_advance_refresh` | 30 | 动态密钥提前刷新阈值（秒） |
 | `key_fetch_quota` / `key_quota_window` | 1000 / 86400 | 密钥发放配额与统计窗口 |
 | `token_rate_limit` / `token_rate_window` | 10 / 60 | Token 接口频率限制与统计窗口 |
-| `dynamic_allow_cookie_fallback` | `false` | 不在 WebUI 展示；仅能手工开启。开启后只允许 GET/HEAD/OPTIONS 使用已有有效 dynamic Cookie 兜底，写请求仍需 RFWDATA |
+| `dynamic_allow_cookie_fallback` | `false` | 不在 WebUI 展示；仅能手工开启。开启后只允许 GET/HEAD/OPTIONS 使用已有有效 dynamic Cookie 兜底，写请求仍需 MA-RFW-Data |
 | `cookie_ttl` | 86400 | Cookie 生命周期（秒） |
 | `cookie_ts_max` | 300 | Cookie 签名时间戳新鲜度上限（秒） |
 | `cookie_replay_window` | 2 | 非安全方法同值 Cookie 的并发宽限窗口（秒） |
 | `cookie_replay_max` | 5 | 非安全方法窗口外同值 Cookie 的最大消费次数 |
 | `cookie_document_require_fetch_metadata` | `false` | 文档重新引导是否额外要求 `Sec-Fetch-Dest=document` |
 | `cookie_missing_max` / `cookie_missing_ttl` | 50 / 86400 | 单 IP 无 Cookie 计数上限与统计窗口 |
-| `sign_window` | 60 | RFWDATA 时间戳有效窗口（秒） |
+| `sign_window` | 60 | MA-RFW-Data 时间戳有效窗口（秒） |
 | `sign_ratio_req` / `sign_ratio_min` | 10 / 0.5 | 签名比例统计起始请求数与最低比例 |
 | `cookie_ratio_req` / `cookie_ratio_min` | 10 / 0.5 | Cookie 兜底比例统计起始请求数与最低比例 |
 | `seq_slack` / `seq_ttl` / `seq_cache_ttl` | 10 / 86400 / 3 | Cookie 会话序号容差、保留期和内存缓存 TTL |
@@ -252,7 +252,7 @@ Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 1
 
 ## 测试
 
-v4.3.4 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、RFWDATA 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
+v4.3.5 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、MA-RFW-Data 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
 
 ```bash
 cd replayfirewall_hardened_v4_3_4
@@ -263,4 +263,4 @@ python3 tools/rfw_v4_test.py \
   --md-out /tmp/rfw_v4_3_4_hardened_test.md
 ```
 
-测试通过标准为 `failed=0`。当前 v4.3.4 dynamic-only 基线为 **53/53 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 RFWDATA、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.4 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。
+测试通过标准为 `failed=0`。当前 v4.3.5 dynamic-only 基线为 **53/53 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 MA-RFW-Data、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.5 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。
