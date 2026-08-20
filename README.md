@@ -1,13 +1,13 @@
-# MA-RFW — MoeArt Replay Firewall v4.3.2
+# MA-RFW — MoeArt Replay Firewall v4.3.4
 
-针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.2 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
+针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.4 重点修复复杂 WebApp 首屏、浏览器重启和动态 Cookie 刷新场景下的误 403。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
 
 ## 特性
 
 - HMAC-SHA256 请求签名（防篡改、防重放）
 - 灰度版固定 `dynamic-only`（短时效密钥，IP+UA 绑定）；不再兼容 static 密钥
 - 动态模式下 Cookie 使用动态密钥签名（非静态 secret）；Key 状态持久化到 `data/rfw_key_records.json`
-- `_RFW` 运动 Token（rfw.js 定时刷新，cookie 路径兜底）
+- `_RFW` 动态 Cookie Token（rfw.js 定时刷新；同源上下文共享唯一刷新调度）
 - 无签名请求行为分析（签名占比 + cookie 校验链）
 - 相同请求指纹重放检测
 - 按 IP 失败计数 → 自动封禁
@@ -19,7 +19,7 @@
 - 历史统计图表（拒绝趋势 + 请求量 + 原因分布）
 - 零外部依赖（纯 Lua + ngx.shared.DICT）
 
-> v4.3.2 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 RFWDATA；`dynamic_allow_cookie_fallback=false`，删除 RFWDATA 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
+> v4.3.4 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 RFWDATA；`dynamic_allow_cookie_fallback=false`，删除 RFWDATA 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
 
 ## 文件结构
 
@@ -82,6 +82,20 @@ server {
     # 启用 RFW（要保护的站点/路径打标记）
     set $rfw_on 1;
 
+    # 外围系统无法注入 rfw.js 时，在 Nginx location 层隔离，统一由 $rfw_on 管理。
+    # 将 /white_url 替换为实际精确路径或前缀；不要把它写入 config.json。
+    location /white_url {
+        set $rfw_on 0;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Cookie $http_cookie;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
     # 前端页面注入 rfw.js。生产环境建议把实际文档入口拆成 exact location，
     # 并设置 $rfw_document 1；不要把它设置在整个 /webapp/ API 前缀上。
     location = /webapp/ {
@@ -130,7 +144,7 @@ nginx -s reload
 
 ### Dynamic-only 密钥策略
 
-v4.3.2 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
+v4.3.4 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
 
 ### 签名请求（优先）
 
@@ -165,7 +179,7 @@ GET/HEAD 且扩展名在静态表 → 跳过签名/比例统计，只做封禁�
 
 ### 前端动态启动与 Cookie 保活
 
-dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。Key 记录同时持久化到 `data/rfw_key_records.json`，因此 Nginx reload/restart 后有效期内的旧 Key 仍可验签，客户端通常无需手工刷新。若服务端在恢复窗口内仍返回 `dynamic-key-missing`，响应会带 `X-RFW-Recover: token`，前端自动重新获取 Key；同一业务请求不会被自动重复提交。若 Token 接口失败或超时，业务请求不会被当作可信无签名请求放行。
+dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。同一 Window 重复加载脚本会被 `__RFW_RUNTIME__` 保护，同源主窗口与 iframe 通过内部 Token Broker 共享 in-flight Token 请求，Token 刷新 Timer 和 Cookie 刷新 Interval 各只保留一套。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。Key 记录同时持久化到 `data/rfw_key_records.json`。每次 Nginx reload/restart 的 `init_by_lua` 阶段会生成新的 `boot_id`；`/cgi-rfw/token` 返回该标识。前端发现 boot_id 变化后会暂停所有同源业务请求并提示“服务器已重启，请刷新页面后继续”，不再用旧 Key 连续发送请求，避免触发误拦截和 IP ban。若 Token 响应没有 `boot_id`，说明线上仍是旧 WebUI 或旧发布包，不能视为 reload 防护已部署。若服务端在恢复窗口内仍返回 `dynamic-key-missing`，响应会带 `X-RFW-Recover: token`；同一业务请求不会被自动重复提交。
 
 Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 180 秒内，缺少 Key 的请求仍然返回 403，但不计入 IP 失败/封禁链，避免 shared dict 初始化期间误 ban；超过恢复宽限后，真正的缺 Key 会重新进入失败链。GET、HEAD、OPTIONS 可以在同一页面并发期间复用同一合法 Cookie，但同值安全请求最多 8 次；POST/PUT/PATCH/DELETE 会按 `cookie_replay_window` 和 `cookie_replay_max` 执行更严格的同值重放限制。已通过 HMAC 的过期 Cookie 只有安全文档 GET/HEAD 可以无感刷新；浏览器重启后 dynamic key record 完全过期时，也只有 `dynamic_document_paths` 或 exact `$rfw_document` 入口允许重新 bootstrap。API、Controller、`.do`、写请求和非文档 GET 不享受该重引导。待刷新的 Cookie 仍需等 upstream HTML 响应在 `header_filter` 中确认后才写出。设置 `cookie_document_require_fetch_metadata=true` 可进一步收紧为必须携带 `Sec-Fetch-Dest=document`。
 
@@ -238,15 +252,15 @@ Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 1
 
 ## 测试
 
-v4.3.2 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、RFWDATA 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
+v4.3.4 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `prod.saz` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、RFWDATA 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
 
 ```bash
-cd replayfirewall_hardened_v4_3_2
+cd replayfirewall_hardened_v4_3_4
 python3 tools/rfw_v4_test.py \
   --config config.json \
   --saz /path/to/prod.saz \
-  --json-out /tmp/rfw_v4_3_2_hardened_test.json \
-  --md-out /tmp/rfw_v4_3_2_hardened_test.md
+  --json-out /tmp/rfw_v4_3_4_hardened_test.json \
+  --md-out /tmp/rfw_v4_3_4_hardened_test.md
 ```
 
-测试通过标准为 `failed=0`。当前 v4.3.2 dynamic-only 基线为 **53/53 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 RFWDATA、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.2 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，避免每请求重新编译 Lua 和文件 I/O。
+测试通过标准为 `failed=0`。当前 v4.3.4 dynamic-only 基线为 **53/53 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR 与全局变量篡改测试通过；覆盖删除 RFWDATA、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.4 版本、服务端/前端 SNAP 过滤；生产 SAZ 回放包含 225 个会话、动态替换后的 217 条序列请求和 60 分钟浏览器重启。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。

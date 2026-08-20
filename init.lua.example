@@ -2,3 +2,5 @@
 -- 开发组织: 萌艺科技 MASEC 项目组 (MoeArt Inc, MA-SEC Team)
 -- init 阶段加载: 只做纯 Lua 初始化, 不碰请求上下文。lua_code_cache 必须 on。
 ma_rfw = require("ma_rfw")
+-- 每次 nginx reload/restart 的 init 阶段生成新的服务启动标识；前端 Token API 会返回该值。
+if ma_rfw and ma_rfw.mark_boot then ma_rfw.mark_boot() end

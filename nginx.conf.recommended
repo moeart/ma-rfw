@@ -7,6 +7,7 @@ http {
 
     # 生产环境必须开启；off 仅用于调试，会显著放大首屏时序抖动。
     lua_code_cache on;
+    init_by_lua_file D:/Library/Desktop/nginx-replay-firewall/replayfirewall/init.lua;
 
     include mime.types;
     default_type application/octet-stream;
@@ -17,6 +18,20 @@ http {
         listen 18080;
         server_name localhost;
         set $rfw_on 1;
+
+        # 外围系统/无法注入 rfw.js 的路径不要进入 RFW。
+        # 将 /white_url 替换为实际前缀；该 location 优先于下面的通用 location。
+        location /white_url {
+            set $rfw_on 0;
+            proxy_pass http://127.0.0.1:18081;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Cookie $http_cookie;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
 
         location /cgi-rfw/ {
             access_by_lua_file D:/Library/Desktop/nginx-replay-firewall/replayfirewall/ma_rfw.lua;

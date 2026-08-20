@@ -23,6 +23,7 @@ local plugin_dir = (src:sub(1, 1) == "@" and src:sub(2) or src):match("^(.*)[/\\
 local DATA_DIR = plugin_dir .. "/data"
 local KEY_STATE_FILE = DATA_DIR .. "/rfw_key_records.json"
 local STATS_FILE = DATA_DIR .. "/rfw_stats.json"
+local BOOT_ID_FILE = DATA_DIR .. "/rfw_boot_id"
 local RFW_BOOT_TS = os.time()
 -- Nginx reload/restart 后给旧客户端一个短暂恢复窗口；此窗口内缺 Key 不计入封禁失败。
 local RESTART_RECOVERY_GRACE = 180
@@ -54,7 +55,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.2 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.4 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true
@@ -213,6 +214,34 @@ local DICT_NAME = "rfw"
 local MKEY_PREFIX = "rfw:"
 
 local store = ngx.shared[DICT_NAME]
+local BOOT_ID_KEY = MKEY_PREFIX .. "boot_id"
+local boot_id_cache
+local function new_boot_id()
+    return tostring(os.time()) .. "-" .. tostring(math.random(1, 2147483647))
+end
+local function get_boot_id()
+    if boot_id_cache then return boot_id_cache end
+    local f = io.open(BOOT_ID_FILE, "r")
+    if f then
+        local v = f:read("*l"); f:close()
+        if v and v ~= "" then boot_id_cache = v; return boot_id_cache end
+    end
+    local existing = store and store:get(BOOT_ID_KEY)
+    boot_id_cache = tostring(existing or new_boot_id())
+    return boot_id_cache
+end
+local function mark_boot()
+    local id = new_boot_id()
+    local tmp = BOOT_ID_FILE .. ".tmp." .. tostring(os.time())
+    local f = io.open(tmp, "w")
+    if f then
+        f:write(id .. "\n"); f:close()
+        os.rename(tmp, BOOT_ID_FILE)
+    end
+    if store then store:set(BOOT_ID_KEY, id, 0) end
+    boot_id_cache = id
+    return id
+end
 if not store then
     rfw_log("ERROR", "ngx.shared." .. DICT_NAME .. " 不存在, " ..
         "请在 nginx.conf 添加: lua_shared_dict " .. DICT_NAME .. " 64m;")
@@ -1496,6 +1525,8 @@ _M.ua_hash = ua_hash_fn
 _M.key_for = key_for
 _M.check_token_rate = check_token_rate
 _M.KEY_MODE = KEY_MODE
+_M.get_boot_id = get_boot_id
+_M.mark_boot = mark_boot
 _G.ma_rfw_core = _M
 
 local ok, phase = pcall(ngx.get_phase)

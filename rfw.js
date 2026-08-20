@@ -15,16 +15,38 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v=4.3.2"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.4"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
 (function () {
-  // 仅作为诊断标记，不用它决定是否安装拦截器；攻击者预置/篡改
-  // window.__RFW__ 不能阻止本次脚本继续安装 Header Gate 客户端逻辑。
+  // 运行时去重只用于避免重复注入造成多个拦截器/Token 请求，不是安全边界。
+  // 即使攻击者预置此标记，服务端 dynamic-only Header Gate 仍会拒绝未签名请求。
+  try {
+    if (window.__RFW_RUNTIME__) return;
+    Object.defineProperty(window, "__RFW_RUNTIME__", {
+      value: true, writable: false, configurable: false, enumerable: false
+    });
+  } catch (e) {}
+
+  // 同源 iframe 与主窗口共享 Token 请求和刷新调度；跨源窗口自动退化为本地实例。
+  var tokenBroker = null;
+  try {
+    var brokerRoot = (window.top && window.top.location.origin === window.location.origin) ? window.top : window;
+    tokenBroker = brokerRoot.__RFW_TOKEN_BROKER__;
+    if (!tokenBroker) {
+      tokenBroker = { promise: null, lastData: null, lastExpiresAt: 0, refreshTimer: null, refreshFn: null, bootId: null, reloadLocked: false };
+      Object.defineProperty(brokerRoot, "__RFW_TOKEN_BROKER__", {
+        value: tokenBroker, writable: false, configurable: false, enumerable: false
+      });
+    }
+  } catch (e) { tokenBroker = null; }
+
+  // 仅作为诊断标记，不用它决定安全策略；攻击者预置/篡改
+  // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.2" }),
+      value: Object.freeze({ loaded: true, version: "4.3.4" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -233,10 +255,7 @@
           return null;
         }).then(function () {
           var secret = getSecret();
-          if (!secret) return _fetch.call(self, input, init).then(function (response) {
-            if (responseRequestsRecovery(response)) requestTokenRecovery();
-            return response;
-          });
+          if (!secret || !isReady()) return Promise.reject(new Error("RFW_TOKEN_NOT_READY"));
           return makeSign(secret, method, url, bodyBuf, getClockOffset()).then(function (r) {
             var h = new Headers(init.headers);
             h.set(H_DATA, r.ts + "." + r.nonce + "." + r.sign);
@@ -247,8 +266,8 @@
               return response;
             });
           });
-        }).catch(function () {
-          return _fetch.call(self, input, init);
+        }).catch(function (e) {
+          return Promise.reject(e);
         });
       };
     }
@@ -267,13 +286,15 @@
         watchXhrRecovery(x);
         var meta = x._rfwMeta || { method: "GET", url: "" };
         if (meta.url && !isSameOrigin(meta.url)) return _send.apply(this, arguments);
+        if (isReloadLocked()) return;
         if (x._rfwAsync === false) {
           // 同步 XHR 不能等待异步 crypto.subtle，但 GET/字符串/二进制
           // 请求体可以用纯 JS 同步 HMAC 生成 RFWDATA。若 dynamic key
-          // 尚未就绪或 body 类型无法同步序列化，则原样发送，由服务端
-          // 对已有合法 _RFW 执行 Cookie fallback；无凭证仍拒绝。
+          // 尚未就绪或 body 类型无法同步序列化，则直接阻止本次发送；
+          // 不把未签名请求交给服务端触发连续 403。
           try {
             var syncSecret = getSecret();
+            if (!syncSecret || !isReady()) return;
             if (syncSecret && isReady()) {
               var syncBuf;
               if (body == null) {
@@ -321,7 +342,7 @@
             _send.call(x, body);
           });
         }).catch(function () {
-          _send.call(x, body);
+          return;
         });
       };
     }
@@ -347,8 +368,45 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
+  var serverBootId = tokenBroker && tokenBroker.bootId ? tokenBroker.bootId : null;
+  var reloadLocked = false;
+  var reloadDialogShown = false;
+
+  function lockForServerReload(nextBootId) {
+    if (reloadLocked || (tokenBroker && tokenBroker.reloadLocked)) return;
+    reloadLocked = true;
+    if (tokenBroker) tokenBroker.reloadLocked = true;
+    dynKey = null;
+    dynReady = false;
+    dynNoKey = true;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    pendingQueue = [];
+    if (!reloadDialogShown) {
+      reloadDialogShown = true;
+      var msg = "服务器已重启，为避免继续请求触发拦截，请刷新页面后继续。";
+      try {
+        if (typeof window.alert === "function") window.alert(msg);
+        else if (window.console) window.console.warn("[rfw.js] " + msg);
+      } catch (e) {}
+    }
+    if (window.console) window.console.warn("[rfw.js] server boot_id changed, requests paused: " + nextBootId);
+  }
+
+  function applyBootSignal(data) {
+    var next = data && data.boot_id ? String(data.boot_id) : "";
+    if (!next) return;
+    if (serverBootId && serverBootId !== next) lockForServerReload(next);
+    if (!serverBootId) serverBootId = next;
+    if (tokenBroker) {
+      if (tokenBroker.bootId && tokenBroker.bootId !== next) lockForServerReload(next);
+      tokenBroker.bootId = next;
+    }
+  }
+
+  function isReloadLocked() { return reloadLocked || !!(tokenBroker && tokenBroker.reloadLocked); }
 
   function requestTokenRecovery() {
+    if (reloadLocked) return;
     var now = Date.now();
     if (now - lastRecoveryAt < 1000) return;
     lastRecoveryAt = now;
@@ -422,6 +480,15 @@
   function startDynamicCookieRefresh() {
     if (typeof document === "undefined") return;
     refreshDynamicCookie(true);
+    if (tokenBroker) {
+      tokenBroker.cookieRefreshFn = function () { refreshDynamicCookie(false); };
+      if (!tokenBroker.cookieTimer) {
+        tokenBroker.cookieTimer = setInterval(function () {
+          if (tokenBroker.cookieRefreshFn) tokenBroker.cookieRefreshFn();
+        }, DYN_COOKIE_REFRESH_MS);
+      }
+      return;
+    }
     if (!dynCookieTimer) {
       dynCookieTimer = setInterval(function () { refreshDynamicCookie(false); }, DYN_COOKIE_REFRESH_MS);
     }
@@ -436,10 +503,17 @@
   }
 
   function enterNoKeyMode() {
+    if (reloadLocked) return;
     dynNoKey  = true;
     dynKey    = null;
-    dynReady  = true;
-    flushQueue();
+    dynReady  = false;
+    pendingQueue = [];
+    if (!reloadDialogShown) {
+      reloadDialogShown = true;
+      try {
+        if (typeof window.alert === "function") window.alert("无法获取安全 Token，请刷新页面或稍后重试。");
+      } catch (e) {}
+    }
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(function () {
       retryTimer = null;
@@ -450,9 +524,56 @@
     if (window.console) console.log("[rfw.js] 进入无签名模式, 5 分钟后重试");
   }
 
+  function applyTokenData(data) {
+    if (!data) return;
+    applyBootSignal(data);
+    if (isReloadLocked()) return;
+    if (!data.key) {
+      enterNoKeyMode();
+      return;
+    }
+    dynKey       = data.key;
+    var expiresIn = data.expires_in || 1800;
+    dynExpiresAt = Date.now() + expiresIn * 1000;
+    dynClockOff  = (data.server_time || Math.floor(Date.now() / 1000)) - Math.floor(Date.now() / 1000);
+    dynNoKey     = false;
+    dynReady     = true;
+    DYN_COOKIE_TTL = data.cookie_ttl || DYN_COOKIE_TTL;
+    DYN_COOKIE_TAG_HEX = Math.max(16, Math.min(64, data.cookie_tag_hex || DYN_COOKIE_TAG_HEX));
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    startDynamicCookieRefresh();
+    flushQueue();
+    if (tokenBroker) {
+      if (tokenBroker.refreshTimer) clearTimeout(tokenBroker.refreshTimer);
+      tokenBroker.refreshFn = fetchAndApplyToken;
+      tokenBroker.refreshTimer = setTimeout(function () {
+        tokenBroker.refreshTimer = null;
+        if (tokenBroker.refreshFn) tokenBroker.refreshFn();
+      }, Math.max((expiresIn - 30) * 1000, 5000));
+    } else {
+      setTimeout(fetchAndApplyToken, Math.max((expiresIn - 30) * 1000, 5000));
+    }
+    if (window.console) console.log("[rfw.js] token 获取成功, expires_in=" + expiresIn + "s, clock_offset=" + dynClockOff + "s");
+  }
+
   function fetchAndApplyToken() {
+    if (isReloadLocked()) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
     if (tokenInFlight) return tokenInFlight;
-    tokenInFlight = rawFetch("/cgi-rfw/token?t=" + Date.now(), {
+    if (tokenBroker && tokenBroker.promise) {
+      tokenInFlight = tokenBroker.promise.then(function (data) {
+        applyTokenData(data);
+        return data;
+      }).then(function (data) {
+        tokenInFlight = null;
+        return data;
+      });
+      return tokenInFlight;
+    }
+    if (tokenBroker && tokenBroker.lastData && tokenBroker.lastExpiresAt > Date.now() + 30000) {
+      applyTokenData(tokenBroker.lastData);
+      return Promise.resolve(tokenBroker.lastData);
+    }
+    var request = rawFetch("/cgi-rfw/token?t=" + Date.now(), {
       method: "GET",
       credentials: "same-origin",
       cache: "no-store"
@@ -460,40 +581,39 @@
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     }).then(function (data) {
-      if (data.key) {
-        dynKey       = data.key;
-        var expiresIn = data.expires_in || 1800;
-        dynExpiresAt = Date.now() + expiresIn * 1000;
-        dynClockOff  = (data.server_time || Math.floor(Date.now() / 1000)) - Math.floor(Date.now() / 1000);
-        dynNoKey     = false;
-        dynReady     = true;
-        DYN_COOKIE_TTL = data.cookie_ttl || DYN_COOKIE_TTL;
-        DYN_COOKIE_TAG_HEX = Math.max(16, Math.min(64, data.cookie_tag_hex || DYN_COOKIE_TAG_HEX));
-        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-        startDynamicCookieRefresh();
-        flushQueue();
-        var advance = Math.max((expiresIn - 30) * 1000, 5000);
-        setTimeout(fetchAndApplyToken, advance);
-        if (window.console) console.log("[rfw.js] token 获取成功, expires_in=" + expiresIn + "s, clock_offset=" + dynClockOff + "s");
-      } else {
-        enterNoKeyMode();
+      if (tokenBroker) {
+        tokenBroker.lastData = data;
+        tokenBroker.lastExpiresAt = Date.now() + (data.expires_in || 1800) * 1000;
       }
+      return data;
     }).catch(function (e) {
-      if (window.console) console.log("[rfw.js] token 获取失败:", e.message || e);
+      if (window.console) window.console.log("[rfw.js] token 获取失败:", e.message || e);
       enterNoKeyMode();
-    }).then(function () {
+      return null;
+    });
+    if (tokenBroker) {
+      tokenBroker.promise = request;
+      request.then(function () {
+        if (tokenBroker.promise === request) tokenBroker.promise = null;
+      });
+    }
+    tokenInFlight = request.then(function (data) {
+      applyTokenData(data);
       tokenInFlight = null;
+      return data;
     });
     return tokenInFlight;
   }
 
   installInterceptors(
     function () {
+      if (reloadLocked) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
       return new Promise(function (resolve) {
         var resolved = false;
         var timer = setTimeout(function () {
           if (resolved) return;
           resolved = true;
+          if (reloadLocked) return;
           if (window.console) console.warn("[rfw.js] 密钥获取超时(5s), 降级为无签名模式");
           if (!dynReady) {
             dynNoKey = true;
@@ -517,14 +637,15 @@
         });
       });
     },
-    function () { return dynNoKey ? null : dynKey; },
+    function () { return (dynNoKey || reloadLocked) ? null : dynKey; },
     function () { return dynClockOff; },
-    function () { return dynReady; }
+    function () { return dynReady && !reloadLocked; }
   );
 
   // 自动恢复: 页面可见/focus 时重新取 token
   ["pageshow", "visibilitychange", "focus"].forEach(function (ev) {
     window.addEventListener(ev, function () {
+      if (reloadLocked) return;
       if (!dynKey || Date.now() > dynExpiresAt - 30000) {
         dynReady = false;
         dynNoKey = false;

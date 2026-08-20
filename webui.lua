@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.2"
+local VERSION = "4.3.4"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -20,6 +20,7 @@ local FIXED_CONFIG_KEYS = {
 }
 local CONFIG_COMMENT_FIELDS = {
     __COMMENT_CONFIG_FORMAT = "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
+    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.4。请与 Lua、WebUI、rfw.js 使用同一发布包。",
     __COMMENT_DYNAMIC_DOCUMENT_PATHS = "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
     __COMMENT_STRICT_API_PATHS = "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
     __COMMENT_DYNAMIC_KEY = "dynamic 密钥生命周期与发放限制。",
@@ -31,6 +32,21 @@ local CONFIG_COMMENT_FIELDS = {
     __COMMENT_FAILURE = "失败计数与 IP 封禁。",
     __COMMENT_ADMIN = "管理面板访问控制。",
 }
+local CONFIG_OUTPUT_ORDER = {
+    "__COMMENT_CONFIG_FORMAT", "__COMMENT_RELEASE", "__COMMENT_DYNAMIC_DOCUMENT_PATHS", "dynamic_document_paths",
+    "__COMMENT_STRICT_API_PATHS", "strict_api_paths",
+    "__COMMENT_DYNAMIC_KEY", "key_ttl", "key_grace", "key_advance_refresh", "key_fetch_quota",
+    "key_quota_window", "token_rate_limit", "token_rate_window", "__COMMENT_COOKIE_FALLBACK",
+    "dynamic_allow_cookie_fallback", "cookie_ttl", "cookie_ts_max", "cookie_replay_window",
+    "cookie_replay_max", "cookie_document_require_fetch_metadata", "__COMMENT_COOKIE_REPLAY",
+    "cookie_missing_max", "cookie_missing_ttl", "__COMMENT_SIGN", "sign_window", "sign_ratio_req",
+    "sign_ratio_min", "cookie_ratio_req", "cookie_ratio_min", "__COMMENT_SEQUENCE", "seq_slack",
+    "seq_ttl", "seq_cache_ttl", "__COMMENT_REPLAY", "replay_threshold", "replay_relink_sec",
+    "__COMMENT_FAILURE", "fail_max", "fail_window", "block_time", "block_cache_ttl",
+    "sweep_interval", "snap_log_interval", "__COMMENT_ADMIN", "admin_whitelist", "admin_trusted_proxies", "debug",
+}
+local CONFIG_ORDER_INDEX = {}
+for i, k in ipairs(CONFIG_OUTPUT_ORDER) do CONFIG_ORDER_INDEX[k] = i end
 
 local function json_pretty(value, level)
     level = level or 0
@@ -54,7 +70,12 @@ local function json_pretty(value, level)
         return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
     end
     if #keys == 0 then return "{}" end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    table.sort(keys, function(a, b)
+        local ra = CONFIG_ORDER_INDEX[tostring(a)] or 100000
+        local rb = CONFIG_ORDER_INDEX[tostring(b)] or 100000
+        if ra ~= rb then return ra < rb end
+        return tostring(a) < tostring(b)
+    end)
     local parts = {}
     for _, k in ipairs(keys) do
         parts[#parts + 1] = child_indent .. cjson.encode(tostring(k)) .. ": " .. json_pretty(value[k], level + 1)
@@ -836,7 +857,7 @@ function addTp(){
   inp.value='';
 }
 document.getElementById('tp-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addTp()}});
-var strictApiData=[],documentPathData=[];
+  var strictApiData=[],documentPathData=[];
 function renderPathTags(id,data){
   var c=document.getElementById(id);if(!c)return;c.innerHTML='';
   data.forEach(function(v,i){var s=document.createElement('span');s.className='tag';s.textContent=v+' ×';s.title='点击删除';s.onclick=function(){data.splice(i,1);renderPathTags(id,data)};c.appendChild(s)})
@@ -847,10 +868,10 @@ function addPathValue(inputId,data,tagsId){
   inp.value='';inp.focus()
 }
 function addStrictApiPath(){addPathValue('strict-api-path-input',strictApiData,'strict-api-path-tags')}
-function addDocumentPath(){addPathValue('document-path-input',documentPathData,'document-path-tags')}
-document.getElementById('strict-api-path-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addStrictApiPath()}});
-document.getElementById('document-path-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addDocumentPath()}});
-function setVal(id,val){var el=document.getElementById(id);if(el)el.value=val==null?'':String(val)}
+  function addDocumentPath(){addPathValue('document-path-input',documentPathData,'document-path-tags')}
+  document.getElementById('strict-api-path-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addStrictApiPath()}});
+  document.getElementById('document-path-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addDocumentPath()}});
+  function setVal(id,val){var el=document.getElementById(id);if(el)el.value=val==null?'':String(val)}
 function getVal(id){var el=document.getElementById(id);return el?el.value:null}
 function setBool(id,val){var el=document.getElementById(id);if(el)el.value=val?'true':'false'}
 function loadConfig(){
@@ -1357,8 +1378,11 @@ local function handle_token()
     end
 
     local core = _G.ma_rfw_core
+    local boot_id = (core and core.get_boot_id and core.get_boot_id()) or ""
+    if boot_id ~= "" then ngx.header["X-RFW-Boot-ID"] = boot_id end
     if not core or core.KEY_MODE ~= "dynamic" then
         return json_response({key = nil, expires_in = 0, server_time = ngx.time(),
+                              boot_id = boot_id,
                               quota_exhausted = true, key_mode = "dynamic",
                               strict_sign = true, dynamic_sign_ratio_fail = true,
                               cookie_fallback = false,
@@ -1379,6 +1403,7 @@ local function handle_token()
                 key = record.current.key,
                 expires_in = record.current.expire - ngx.time(),
                 server_time = ngx.time(),
+                boot_id = boot_id,
                 quota_exhausted = true,
                 key_mode = "dynamic",
                 strict_sign = true,
@@ -1391,7 +1416,7 @@ local function handle_token()
         end
         return json_response({
             key = nil, expires_in = 0,
-            server_time = ngx.time(), quota_exhausted = true,
+            server_time = ngx.time(), boot_id = boot_id, quota_exhausted = true,
             key_mode = "dynamic",
             strict_sign = true,
             dynamic_sign_ratio_fail = true,
@@ -1413,6 +1438,7 @@ local function handle_token()
         expires_in = key and math.max(0, expire - ngx.time()) or 0,
         cookie_ttl = config.cookie_ttl or 86400,
         server_time = ngx.time(),
+        boot_id = boot_id,
         quota_exhausted = quota_exhausted,
         key_mode = "dynamic",
         strict_sign = true,
