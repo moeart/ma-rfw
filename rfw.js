@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.10"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.11"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -46,7 +46,7 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.10" }),
+      value: Object.freeze({ loaded: true, version: "4.3.11" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -583,7 +583,7 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
-  var CLIENT_VERSION = "4.3.10";
+  var CLIENT_VERSION = "4.3.11";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
   var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;
@@ -644,6 +644,25 @@
   }
 
   function isReloadLocked() { return reloadLocked || !!(tokenBroker && tokenBroker.reloadLocked); }
+
+  function syncTokenFromBroker() {
+    if (!tokenBroker || !tokenBroker.lastData || !tokenBroker.lastData.key) return false;
+    if (tokenBroker.lastExpiresAt <= Date.now() + 30000) return false;
+    // Broker 只共享同源页面已成功取得的 Token 响应；每个脚本闭包仍持有
+    // 自己的 dynKey。iframe 先恢复后，主框架必须在下一次签名前套用该
+    // 已验证响应，不能继续用本地“尚未过期”的旧 Key 造成 sign-invalid。
+    if (!dynReady || dynKey !== tokenBroker.lastData.key) {
+      applyTokenData(tokenBroker.lastData);
+      return true;
+    }
+    return false;
+  }
+
+  function brokerRefreshPending() {
+    // requestTokenRecovery 会先清空 lastData，再创建共享 Token 请求。
+    // 在该窗口里任何同源上下文都必须等待该请求完成，不能抢先签发旧 Key。
+    return !!(tokenBroker && tokenBroker.promise && !tokenBroker.lastData);
+  }
 
   function requestTokenRecovery(force) {
     if (reloadLocked) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
@@ -933,10 +952,14 @@
           fetchAndApplyToken();
       });
     },
-    function () { return (dynNoKey || reloadLocked) ? null : dynKey; },
+    function () {
+      syncTokenFromBroker();
+      return (dynNoKey || reloadLocked || brokerRefreshPending()) ? null : dynKey;
+    },
     function () { return dynClockOff; },
     function () {
-      return dynReady && !reloadLocked && !!dynKey && Date.now() <= dynExpiresAt - 30000;
+      syncTokenFromBroker();
+      return dynReady && !reloadLocked && !brokerRefreshPending() && !!dynKey && Date.now() <= dynExpiresAt - 30000;
     }
   );
 
