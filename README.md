@@ -1,6 +1,6 @@
-# MA-RFW — MoeArt Replay Firewall v4.3.8
+# MA-RFW — MoeArt Replay Firewall v4.3.9
 
-针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.8 重点修复复杂 WebApp 在后台停留半小时以上、多个同源 iframe 分别注入 `rfw.js` 后的 Token 恢复竞态：Token 获取失败或超时后，异步 XHR fail-closed，不会原样发送无签名请求。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（Cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
+针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.9 重点修复复杂 WebApp 在后台停留半小时以上、多个同源 iframe 分别注入 `rfw.js` 后的可恢复 403：服务器只在 access 阶段确认未转发业务后端时，明确授权前端校时、换 Token 并重生原请求一次；业务 fetch/XHR 只接收最终响应。Token 获取失败或超时后，异步 XHR 仍 fail-closed，不会原样发送无签名请求。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（Cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
 
 ## 特性
 
@@ -15,17 +15,18 @@
 - dynamic 文档使用显式 `dynamic_document_paths` 白名单，不依赖尾斜杠、Accept 或 `Sec-Fetch-Dest` 猜测
 - upstream 响应的 `Content-Type` 仅在 `header_filter` 阶段确认是否发送待刷新的文档 Cookie，不参与 access 放行
 - `/cgi-rfw/token` 端点（动态模式密钥发放，频率限制 + 配额控制；Nginx 重启后恢复持久化 Key）
+- `/cgi-rfw/time` 端点（匿名无密钥校时；不发放 Key、不消耗 Token 配额）
 - `/cgi-rfw/rfw.min.js` 端点（内存缓存，no-cache 头）
 - 历史统计图表（拒绝趋势 + 请求量 + 原因分布）
 - 零外部依赖（纯 Lua + ngx.shared.DICT）
 
-> v4.3.8 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 MA-RFW-Data；在后台恢复、Token 超时或 Token 端点暂时失败时，业务请求 fail-closed，不会凭空 Header 发送。`dynamic_allow_cookie_fallback=false`，删除 MA-RFW-Data 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
+> v4.3.9 灰度策略：运行时固定 `dynamic-only`，所有异步/同步 XHR 默认必须携带当前 MA-RFW-Data；在后台恢复、Token 超时或 Token 端点暂时失败时，业务请求 fail-closed，不会凭空 Header 发送。仅当 403 同时带有 `MA-RFW-Recover: token` 和 `MA-RFW-Retry: resign` 时，前端才会校时、换 Token 并重生原请求一次；没有这两个授权头的 403 永不自动重放。`dynamic_allow_cookie_fallback=false`，删除 MA-RFW-Data 后不能凭 `_RFW` Cookie 兜底。旧 static secret、旧 static Cookie 和三段式旧 Cookie 格式不再接受。客户端 `window.__RFW__`、`__RFW_MODE__` 和 `__RFW_TOKEN__` 不是安全信任边界；服务端 Header Gate 才是最终判定。
 
 ## 文件结构
 
 | 文件 | 说明 |
 | --- | --- |
-| `webui.lua` | WebUI 单文件插件（状态页 / 配置页 / 日志页 + 所有 API + token 端点 + rfw.min.js 服务） |
+| `webui.lua` | WebUI 单文件插件（状态页 / 配置页 / 日志页 + 所有 API + token/time 端点 + rfw.min.js 服务） |
 | `ma_rfw.lua` | 主插件（访问阶段校验 + 动态密钥管理 + 后台清扫 + 日志） |
 | `sha256.lua` | 纯 Lua SHA256 / HMAC-SHA256（零外部依赖） |
 | `rfw.js` | 前端签名拦截器（覆盖 fetch 与 XMLHttpRequest，固定 dynamic-only） |
@@ -144,7 +145,7 @@ nginx -s reload
 
 ### Dynamic-only 密钥策略
 
-v4.3.8 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
+v4.3.9 不再通过配置切换 static/dynamic。Lua 运行时将 `KEY_MODE` 固定为 `dynamic`；`key_mode`、static 密钥、旧 `secret`、旧三段式 Cookie 和 legacy 字段都不应出现在配置文件中，若重新加入固定字段，运行时会直接报配置错误。服务端通过 `/cgi-rfw/token` 按 IP+UA 发放短时效密钥（TTL 1800s），前端使用 dynamic key 签名；Cookie 使用代码固定的 `_RFW` 名称、dynamic key 和 32 hex HMAC 标签。
 
 ### 签名请求（优先）
 
@@ -179,7 +180,7 @@ GET/HEAD 且扩展名在静态表 → 跳过签名/比例统计，只做封禁�
 
 ### 前端动态启动与 Cookie 保活
 
-dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。同一 Window 重复加载脚本会被 `__RFW_RUNTIME__` 保护，同源主窗口与 iframe 通过内部 Token Broker 共享 in-flight Token 请求，Token 刷新 Timer 和 Cookie 刷新 Interval 各只保留一套。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。Key 记录同时持久化到 `data/rfw_key_records.json`。每次 Nginx reload/restart 的 `init_by_lua` 阶段会生成新的 `boot_id`；`/cgi-rfw/token` 返回该标识。前端发现 boot_id 变化后会暂停所有同源业务请求并提示“系统维护，请刷新页面。”，不再用旧 Key 连续发送请求，避免触发误拦截和 IP ban。若 Token 响应没有 `boot_id`，说明线上仍是旧 WebUI 或旧发布包，不能视为 reload 防护已部署。若服务端在恢复窗口内仍返回 `dynamic-key-missing`，响应会带 `MA-RFW-Recover: token`；`sign-expired`/`sign-invalid` 也会发送该恢复信号；同一业务请求不会被自动重复提交。
+dynamic-only 模式下，Token 接口使用原始 `fetch`，不会被自身的请求拦截器再次排队；密钥获取期间的业务 API 进入等待队列。同一 Window 重复加载脚本会被 `__RFW_RUNTIME__` 保护，同源主窗口与 iframe 通过内部 Token Broker 共享 in-flight Token 请求，Token 刷新 Timer、Cookie 刷新 Interval 和同一轮校时请求各只保留一套。密钥成功后，前端按服务端时钟每 30 秒刷新一次 `_RFW` Cookie，以避免长页面加载或后台恢复时使用过期 Cookie。Key 记录同时持久化到 `data/rfw_key_records.json`。每次 Nginx reload/restart 的 `init_by_lua` 阶段会生成新的 `boot_id`；`/cgi-rfw/token` 与无密钥的 `/cgi-rfw/time` 都返回该标识。若服务端 access 阶段因 `sign-expired` 或 `dynamic-key-missing` 拒绝请求，它会同时返回 `MA-RFW-Recover: token` 与 `MA-RFW-Retry: resign`：rfw.js 先校时，再强制换 Token，用同一 method、URL、body 和业务 headers 生成新的 MA-RFW-Data 并仅重发一次。首次 403 不会交付给业务 fetch/XHR；重试后的成功或失败响应才会交付。`sign-invalid`、`nonce-replay`、`body-mismatch`、`blocked`、`sign-ratio-low` 等攻击或策略拒绝不携带重试授权，因此绝不会自动重放。POST/PUT/PATCH/DELETE 仅因服务器已在 access 阶段中止、未转发业务后端时才获得相同的一次授权。若 Token 或协议版本无法恢复，前端仍 fail-closed；协议不匹配时才显示通用维护刷新提示。
 
 Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 180 秒内，缺少 Key 的请求仍然返回 403，但不计入 IP 失败/封禁链，避免 shared dict 初始化期间误 ban；超过恢复宽限后，真正的缺 Key 会重新进入失败链。GET、HEAD、OPTIONS 可以在同一页面并发期间复用同一合法 Cookie，但同值安全请求最多 8 次；POST/PUT/PATCH/DELETE 会按 `cookie_replay_window` 和 `cookie_replay_max` 执行更严格的同值重放限制。已通过 HMAC 的过期 Cookie 只有安全文档 GET/HEAD 可以无感刷新；浏览器重启后 dynamic key record 完全过期时，也只有 `dynamic_document_paths` 或 exact `$rfw_document` 入口允许重新 bootstrap。API、Controller、`.do`、写请求和非文档 GET 不享受该重引导。待刷新的 Cookie 仍需等 upstream HTML 响应在 `header_filter` 中确认后才写出。设置 `cookie_document_require_fetch_metadata=true` 可进一步收紧为必须携带 `Sec-Fetch-Dest=document`。
 
@@ -219,6 +220,7 @@ Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 1
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
 | `/cgi-rfw/token` | GET | 动态密钥发放（rate limit + quota；失败不放行受保护请求） |
+| `/cgi-rfw/time` | GET | 匿名校时与 boot_id 查询（不发放 Key、不消耗 Token 配额） |
 | `/cgi-rfw/rfw.min.js` | GET | 前端拦截器（内存缓存，no-cache 头） |
 | `/cgi-rfw/status` | GET | 管理面板状态页 |
 | `/cgi-rfw/config` | GET | 管理面板配置页 |
@@ -252,15 +254,15 @@ Dynamic 模式下，HMAC、时效和序号始终检查。Nginx 重启后的前 1
 
 ## 测试
 
-v4.3.8 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `脱敏回放文件` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、MA-RFW-Data 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、60 分钟浏览器重启、Token 端点故障时异步 XHR fail-closed 和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
+v4.3.9 将原先分散的工具合并为单一入口。它使用真实 `ma_rfw.lua`、本地 shared-dict mock 和 `脱敏回放文件` 请求序列，不向生产发送请求；同时覆盖 dynamic-only、MA-RFW-Data 篡改/过期/重放、删除凭证攻击、Cookie 重放、显式文档路径、Controller/.do 拒绝、响应 MIME 确认、WebUI 配置、`/cgi-rfw/time`、`MA-RFW-Retry: resign` 授权边界、60 分钟浏览器重启、Token 端点故障时异步 XHR fail-closed 和性能基线。SAZ 的 absolute-form URL 会先转换为 Nginx 的 path+query，避免测试工具与生产 `ngx.var.uri/request_uri` 语义不一致。
 
 ```bash
-cd replayfirewall_hardened_v4_3_8
+cd replayfirewall_hardened_v4_3_9
 python3 tools/rfw_v4_test.py \
   --config config.json \
   --saz /path/to/脱敏回放文件 \
-  --json-out /tmp/rfw_v4_3_8_hardened_test.json \
-  --md-out /tmp/rfw_v4_3_8_hardened_test.md
+  --json-out /tmp/rfw_v4_3_9_hardened_test.json \
+  --md-out /tmp/rfw_v4_3_9_hardened_test.md
 ```
 
-测试通过标准为 `failed=0`。当前 v4.3.8 dynamic-only 基线为 **59/59 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR、Token recovery 强制刷新、Token 故障时异步 XHR fail-closed、旧协议 fail-closed 与全局变量篡改测试通过；覆盖删除 MA-RFW-Data、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.8 版本、服务端/前端 SNAP 过滤；并已在 Chromium 中使用主窗口加两个注入 `rfw.js` 的同源 iframe，按“业务轮询先恢复、页面事件后恢复”顺序验证 30/45/60/120 分钟后台停留窗口及 Token 故障场景。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。
+测试通过标准为 `failed=0`。当前 v4.3.9 dynamic-only 基线为 **64/64 PASS，0 FAIL，0 SKIP**，另有前端 Node 异步/同步 XHR、Token recovery 强制刷新、Token 故障时异步 XHR fail-closed、旧协议 fail-closed 与全局变量篡改测试通过；覆盖删除 MA-RFW-Data、删除 `_RFW`、同时删除两者、static 配置拒绝、低签名比例拒绝、WebUI v4.3.9 版本、`/cgi-rfw/time`、服务端只对过期/缺 Key access 拒绝授权单次重签，以及服务端/前端 SNAP 过滤。真实 Chromium 已使用主窗口加两个注入 `rfw.js` 的同源 iframe，验证后台 30 分钟后的授权 403：fetch 与 XHR 均只接收重签后的 200；攻击型 403 没有授权头时不校时、不换 Token、不重放。本地性能数字只用于回归比较，不代表生产 QPS；生产性能依赖 OpenResty、CPU、shared dict 大小和实际 WebApp 请求体。生产必须使用 `lua_code_cache on`，并通过 `init_by_lua_file` 加载 `init.lua` 以生成 reload boot_id，避免每请求重新编译 Lua 和文件 I/O。

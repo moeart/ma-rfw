@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.8"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.9"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -35,7 +35,7 @@
     var brokerRoot = (window.top && window.top.location.origin === window.location.origin) ? window.top : window;
     tokenBroker = brokerRoot.__RFW_TOKEN_BROKER__;
     if (!tokenBroker) {
-      tokenBroker = { promise: null, lastData: null, lastExpiresAt: 0, refreshTimer: null, refreshFn: null, bootId: null, reloadLocked: false };
+      tokenBroker = { promise: null, timePromise: null, lastData: null, lastExpiresAt: 0, refreshTimer: null, refreshFn: null, bootId: null, reloadLocked: false };
       Object.defineProperty(brokerRoot, "__RFW_TOKEN_BROKER__", {
         value: tokenBroker, writable: false, configurable: false, enumerable: false
       });
@@ -46,7 +46,7 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.8" }),
+      value: Object.freeze({ loaded: true, version: "4.3.9" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -218,6 +218,39 @@
   //   isReady() → 密钥是否就绪(ready=true 后才放行请求)
   // ============================================================
   function installInterceptors(getPendingPromise, getSecret, getClockOffset, isReady) {
+    function copyFetchInit(init) {
+      var out = {};
+      init = init || {};
+      for (var k in init) {
+        if (Object.prototype.hasOwnProperty.call(init, k) && k !== "_rfwRetried") out[k] = init[k];
+      }
+      return out;
+    }
+
+    function makeRetryFetchInit(input, init, method, headers, bodyBuf, hasBody) {
+      var out = copyFetchInit(init);
+      out.method = method;
+      out.headers = headers;
+      // 第一次请求继续使用业务提供的 body；重试时才由调用方填入已快照的
+      // ArrayBuffer，以避免 Request body 在第一次 fetch 后已被消费。
+      return out;
+    }
+
+    function retryFetchOnce(self, input, init, method, url, bodyBuf, hasBody) {
+      return repairRfwAfterRecover().then(function () {
+        var secret = getSecret();
+        if (!secret || !isReady()) throw new Error("RFW_TOKEN_NOT_READY");
+        return makeSign(secret, method, url, bodyBuf, getClockOffset());
+      }).then(function (r) {
+        var h = new Headers(init.headers || (input && input.headers) || undefined);
+        h.set(H_DATA, r.ts + "." + r.nonce + "." + r.sign);
+        var retryInit = makeRetryFetchInit(input, init, method, h, bodyBuf, hasBody);
+        if (hasBody) retryInit.body = bodyBuf.slice ? bodyBuf.slice(0) : bodyBuf;
+        retryInit._rfwRetried = true;
+        return _fetch.call(self, input, retryInit);
+      });
+    }
+
     // ---- fetch ----
     if (typeof window.fetch === "function") {
       var _fetch = window.fetch;
@@ -257,11 +290,15 @@
           var secret = getSecret();
           if (!secret || !isReady()) return Promise.reject(new Error("RFW_TOKEN_NOT_READY"));
           return makeSign(secret, method, url, bodyBuf, getClockOffset()).then(function (r) {
-            var h = new Headers(init.headers);
+            var h = new Headers(init.headers || (input && input.headers) || undefined);
             h.set(H_DATA, r.ts + "." + r.nonce + "." + r.sign);
-            init.method = method;
-            init.headers = h;
-            return _fetch.call(self, input, init).then(function (response) {
+            var signedInit = makeRetryFetchInit(input, init, method, h, bodyBuf, hasBody);
+            return _fetch.call(self, input, signedInit).then(function (response) {
+              if (!signedInit._rfwRetried && responseAuthorizesResign(response)) {
+                // 第一次 403 未交给业务调用方；只可由服务端的 access 阶段
+                // 明确授权后，校时/换 Key 并按原 method/url/body/headers 重生一次。
+                return retryFetchOnce(self, input, init, method, url, bodyBuf, hasBody);
+              }
               if (responseRequestsRecovery(response)) requestTokenRecovery();
               return response;
             });
@@ -276,17 +313,186 @@
     if (typeof XMLHttpRequest !== "undefined") {
       var _open = XMLHttpRequest.prototype.open;
       var _send = XMLHttpRequest.prototype.send;
+      var _setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+      var _addEventListener = XMLHttpRequest.prototype.addEventListener;
+      var _removeEventListener = XMLHttpRequest.prototype.removeEventListener;
+      var xhrHasEventTarget = typeof _addEventListener === "function";
+      var XHR_GATED_EVENTS = ["readystatechange", "load", "loadend", "error", "timeout", "abort"];
+
+      function isXhrGatedEvent(type) {
+        return XHR_GATED_EVENTS.indexOf(String(type)) >= 0;
+      }
+
+      function callXhrUserHandler(x, type, event) {
+        var handler = x._rfwUserHandlers && x._rfwUserHandlers[type];
+        if (typeof handler === "function") {
+          try { handler.call(x, event); } catch (e) { setTimeout(function () { throw e; }, 0); }
+        }
+        var list = x._rfwUserEvents && x._rfwUserEvents[type];
+        if (list) {
+          var copy = list.slice();
+          for (var i = 0; i < copy.length; i++) {
+            try { copy[i].listener.call(x, event); } catch (e2) { setTimeout(function () { throw e2; }, 0); }
+          }
+        }
+      }
+
+      function suppressNativeXhrEvent(event) {
+        try { if (event) event.__rfwSuppressed = true; } catch (e0) {}
+        try { if (event && event.stopImmediatePropagation) event.stopImmediatePropagation(); } catch (e) {}
+        try { if (event && event.preventDefault) event.preventDefault(); } catch (e2) {}
+      }
+
+      function setXhrRfwHeader(x, value) {
+        x._rfwApplyingHeaders = true;
+        try { _setRequestHeader.call(x, H_DATA, value); } finally { x._rfwApplyingHeaders = false; }
+      }
+
+      function replayXhrOnce(x) {
+        var meta = x._rfwMeta || {};
+        return repairRfwAfterRecover().then(function () {
+          var secret = getSecret();
+          if (!secret || !isReady()) throw new Error("RFW_TOKEN_NOT_READY");
+          var body = x._rfwBody;
+          var p;
+          if (body == null) p = Promise.resolve(new ArrayBuffer(0));
+          else if (typeof body === "string") p = Promise.resolve(enc.encode(body).buffer);
+          else if (body instanceof ArrayBuffer) p = Promise.resolve(body);
+          else if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(body)) p = Promise.resolve(body.buffer);
+          else p = new Response(body).arrayBuffer();
+          return p.then(function (buf) {
+            return makeSign(secret, meta.method, meta.url, buf, getClockOffset());
+          });
+        }).then(function (r) {
+          // 服务端已保证第一次请求停在 access 阶段；重新 open 时浏览器会清空
+          // 请求头，因此仅恢复业务头，并以新的 MA-RFW-Data 覆盖旧签名。
+          _open.call(x, meta.method, meta.url, meta.async, meta.user, meta.pass);
+          x._rfwApplyingHeaders = true;
+          try {
+            var headers = x._rfwRequestHeaders || [];
+            for (var i = 0; i < headers.length; i++) {
+              if (headers[i][0].toLowerCase() !== H_DATA.toLowerCase()) _setRequestHeader.call(x, headers[i][0], headers[i][1]);
+            }
+            _setRequestHeader.call(x, H_DATA, r.ts + "." + r.nonce + "." + r.sign);
+          } finally { x._rfwApplyingHeaders = false; }
+          x._rfwRetried = true;
+          x._rfwRetrying = false;
+          _send.call(x, x._rfwBody);
+        }).catch(function () {
+          // 修复失败时没有第二个 HTTP 响应可交付。以受控错误事件通知业务，
+          // 仍绝不把无签名请求发送给服务端。
+          x._rfwRetrying = false;
+          callXhrUserHandler(x, "error", new Event("error"));
+          callXhrUserHandler(x, "loadend", new Event("loadend"));
+        });
+      }
+
+      function onNativeXhrEvent(x, event) {
+        var type = event && event.type;
+        if (!type) return;
+        if (x._rfwRetrying) {
+          suppressNativeXhrEvent(event);
+          return;
+        }
+        var xhrRecoveryResponse = { status: x.status, headers: { get: function (name) { return x.getResponseHeader(name); } } };
+        if ((type === "load" || (type === "readystatechange" && x.readyState === 4)) &&
+            x._rfwAsync !== false && !x._rfwRetried &&
+            responseAuthorizesResign(xhrRecoveryResponse)) {
+          x._rfwRetrying = true;
+          suppressNativeXhrEvent(event);
+          replayXhrOnce(x);
+          return;
+        }
+        if (type === "load" && responseRequestsRecovery(xhrRecoveryResponse)) {
+          // 旧服务端仅有 Recover 头时仍刷新后续请求所用 Token，但绝不对
+          // 当前请求重放；请求重生只接受新服务端显式 Retry 授权。
+          requestTokenRecovery();
+        }
+        callXhrUserHandler(x, type, event);
+      }
+
+      function installXhrEventGate(x) {
+        if (x._rfwEventGateInstalled) return;
+        // 最小化测试/旧兼容实现可能没有 EventTarget 接口；此时无法拦截
+        // 已完成响应，维持原有发送逻辑即可。真实浏览器均具备该接口。
+        if (!xhrHasEventTarget) return;
+        x._rfwEventGateInstalled = true;
+        x._rfwUserEvents = {};
+        x._rfwUserHandlers = {};
+        for (var i = 0; i < XHR_GATED_EVENTS.length; i++) {
+          (function (eventType) {
+            x._rfwAddingInternal = true;
+            _addEventListener.call(x, eventType, function (event) { onNativeXhrEvent(x, event); });
+            x._rfwAddingInternal = false;
+          })(XHR_GATED_EVENTS[i]);
+        }
+      }
+
+      for (var gatedIndex = 0; gatedIndex < XHR_GATED_EVENTS.length; gatedIndex++) {
+        (function (eventType) {
+          var prop = "on" + eventType;
+          var descriptor = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, prop);
+          if (descriptor && descriptor.configurable === false) return;
+          Object.defineProperty(XMLHttpRequest.prototype, prop, {
+            configurable: true,
+            enumerable: descriptor ? descriptor.enumerable : true,
+            get: function () {
+              return this._rfwUserHandlers ? this._rfwUserHandlers[eventType] || null : (descriptor && descriptor.get ? descriptor.get.call(this) : null);
+            },
+            set: function (handler) {
+              if (this._rfwUserHandlers) { this._rfwUserHandlers[eventType] = handler; return; }
+              if (descriptor && descriptor.set) descriptor.set.call(this, handler);
+            }
+          });
+        })(XHR_GATED_EVENTS[gatedIndex]);
+      }
+
       XMLHttpRequest.prototype.open = function (method, url, async, user, pass) {
-        this._rfwMeta = { method: String(method || "GET").toUpperCase(), url: url };
+        this._rfwMeta = { method: String(method || "GET").toUpperCase(), url: url, async: async !== false, user: user, pass: pass };
         this._rfwAsync = (async !== false);
+        this._rfwRetried = false;
+        this._rfwRetrying = false;
+        this._rfwRequestHeaders = [];
+        installXhrEventGate(this);
         return _open.apply(this, arguments);
       };
+      XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+        if (!this._rfwApplyingHeaders) {
+          this._rfwRequestHeaders = this._rfwRequestHeaders || [];
+          this._rfwRequestHeaders.push([String(name), String(value)]);
+        }
+        return _setRequestHeader.apply(this, arguments);
+      };
+      if (xhrHasEventTarget) {
+        XMLHttpRequest.prototype.addEventListener = function (type, listener, options) {
+          if (isXhrGatedEvent(type) && !this._rfwAddingInternal) {
+            var list = this._rfwUserEvents && this._rfwUserEvents[type];
+            if (list) list.push({ listener: listener, options: options });
+            return;
+          }
+          return _addEventListener.apply(this, arguments);
+        };
+        if (_removeEventListener) {
+          XMLHttpRequest.prototype.removeEventListener = function (type, listener, options) {
+            if (isXhrGatedEvent(type) && !this._rfwAddingInternal) {
+              var list = this._rfwUserEvents && this._rfwUserEvents[type];
+              if (list) {
+                for (var i = list.length - 1; i >= 0; i--) {
+                  if (list[i].listener === listener) list.splice(i, 1);
+                }
+              }
+              return;
+            }
+            return _removeEventListener.apply(this, arguments);
+          };
+        }
+      }
       XMLHttpRequest.prototype.send = function (body) {
         var x = this;
-        watchXhrRecovery(x);
         var meta = x._rfwMeta || { method: "GET", url: "" };
         if (meta.url && !isSameOrigin(meta.url)) return _send.apply(this, arguments);
         if (isReloadLocked()) return;
+        x._rfwBody = body;
         if (x._rfwAsync === false) {
           // 同步 XHR 不能等待异步 crypto.subtle，但 GET/字符串/二进制
           // 请求体可以用纯 JS 同步 HMAC 生成 MA-RFW-Data。若 dynamic key
@@ -313,7 +519,7 @@
               }
               if (syncBuf !== null) {
                 var syncSign = makeSignSync(syncSecret, meta.method, meta.url, syncBuf, getClockOffset());
-                x.setRequestHeader(H_DATA, syncSign.ts + "." + syncSign.nonce + "." + syncSign.sign);
+                setXhrRfwHeader(x, syncSign.ts + "." + syncSign.nonce + "." + syncSign.sign);
               }
             }
           } catch (e) {}
@@ -347,7 +553,7 @@
             return;
           }
           return makeSign(secret, meta.method, meta.url, buf, getClockOffset()).then(function (r) {
-            try { x.setRequestHeader(H_DATA, r.ts + "." + r.nonce + "." + r.sign); } catch (e) {}
+            try { setXhrRfwHeader(x, r.ts + "." + r.nonce + "." + r.sign); } catch (e) {}
             _send.call(x, body);
           });
         }).catch(function () {
@@ -377,7 +583,7 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
-  var CLIENT_VERSION = "4.3.8";
+  var CLIENT_VERSION = "4.3.9";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
   var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;
@@ -439,10 +645,10 @@
 
   function isReloadLocked() { return reloadLocked || !!(tokenBroker && tokenBroker.reloadLocked); }
 
-  function requestTokenRecovery() {
-    if (reloadLocked) return;
+  function requestTokenRecovery(force) {
+    if (reloadLocked) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
     var now = Date.now();
-    if (now - lastRecoveryAt < 1000) return;
+    if (!force && now - lastRecoveryAt < 1000) return tokenInFlight || Promise.resolve(null);
     lastRecoveryAt = now;
     dynKey = null;
     dynReady = false;
@@ -455,7 +661,7 @@
       tokenBroker.lastData = null;
       tokenBroker.lastExpiresAt = 0;
     }
-    fetchAndApplyToken();
+    return fetchAndApplyToken();
   }
 
   function responseRequestsRecovery(response) {
@@ -465,14 +671,62 @@
     } catch (e) { return false; }
   }
 
-  function watchXhrRecovery(x) {
-    if (!x || typeof x.addEventListener !== "function") return;
-    x.addEventListener("load", function () {
-      try {
-        if (x.status === 403 && x.getResponseHeader("MA-RFW-Recover") === "token") {
-          requestTokenRecovery();
-        }
-      } catch (e) {}
+  function responseAuthorizesResign(response) {
+    try {
+      return response && response.status === 403 && response.headers &&
+        response.headers.get("MA-RFW-Recover") === "token" &&
+        response.headers.get("MA-RFW-Retry") === "resign";
+    } catch (e) { return false; }
+  }
+
+  function applyTimeData(data) {
+    if (!data || typeof data.server_time !== "number") return false;
+    if (!applyProtocolSignal(data)) return false;
+    applyBootSignal(data);
+    dynClockOff = Math.floor(data.server_time) - Math.floor(Date.now() / 1000);
+    return !isReloadLocked();
+  }
+
+  function fetchServerTime() {
+    if (isReloadLocked()) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
+    if (tokenBroker && tokenBroker.timePromise) {
+      return tokenBroker.timePromise.then(function (data) {
+        applyTimeData(data);
+        return data;
+      });
+    }
+    var request = rawFetch("/cgi-rfw/time?t=" + Date.now(), {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store"
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+    if (tokenBroker) {
+      tokenBroker.timePromise = request;
+      request.then(function () {
+        if (tokenBroker.timePromise === request) tokenBroker.timePromise = null;
+      }, function () {
+        if (tokenBroker.timePromise === request) tokenBroker.timePromise = null;
+      });
+    }
+    return request.then(function (data) {
+      applyTimeData(data);
+      return data;
+    });
+  }
+
+  function repairRfwAfterRecover() {
+    // 客户端时间仅用于定位偏移；服务端仍以自己的时间、Key、HMAC 和 nonce
+    // 独立验签。time 端点不发 Key、不消耗 Key 配额，随后才强制换取 Token。
+    return fetchServerTime().catch(function () { return null; }).then(function () {
+      return requestTokenRecovery(true);
+    }).then(function (data) {
+      if (!data || !data.key || !dynReady || !dynKey || Date.now() > dynExpiresAt - 30000) {
+        throw new Error("RFW_TOKEN_NOT_READY");
+      }
+      return data;
     });
   }
 

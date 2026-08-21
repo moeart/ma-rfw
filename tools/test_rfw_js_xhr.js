@@ -13,10 +13,11 @@ function makeContext(options = {}) {
   const tokenResponses = options.tokenResponses || [{
     key: 'dynamic-test-key', expires_in: 1800,
     server_time: Math.floor(Date.now() / 1000),
-    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1'
+    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1'
   }];
   let tokenIndex = 0;
-  const calls = options.calls || { token: 0, business: 0 };
+  const calls = options.calls || { token: 0, time: 0, business: 0 };
+  if (typeof calls.time !== 'number') calls.time = 0;
   const listeners = {};
   const timers = [];
   const window = {
@@ -32,6 +33,14 @@ function makeContext(options = {}) {
         }
         const token = tokenResponses[Math.min(tokenIndex++, tokenResponses.length - 1)];
         return Promise.resolve({ ok: true, json: () => Promise.resolve(token) });
+      }
+      if (String(url).indexOf('/cgi-rfw/time') === 0) {
+        calls.time++;
+        const time = options.timeResponse || {
+          server_time: Math.floor(Date.now() / 1000), boot_id: 'boot-a',
+          rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1'
+        };
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(time) });
       }
       calls.business++;
       if (typeof options.businessResponse === 'function') {
@@ -125,8 +134,8 @@ function makeContext(options = {}) {
   const boot = makeContext({
     calls: bootCalls,
     tokenResponses: [
-      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' },
-      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' }
+      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' },
+      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -144,8 +153,8 @@ function makeContext(options = {}) {
   const recovery = makeContext({
     calls: recoveryCalls,
     tokenResponses: [
-      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' },
-      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' }
+      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' },
+      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' }
     ],
     businessResponse: () => ({ ok: false, status: 403, headers: { get(name) { return name === 'MA-RFW-Recover' ? 'token' : null; } } })
   });
@@ -159,13 +168,53 @@ function makeContext(options = {}) {
     throw new Error('MA-RFW-Recover did not force fresh Token: ' + JSON.stringify(recoveryCalls));
   }
 
+  // 服务端明确 MA-RFW-Retry: resign 时，首次 403 必须只留在拦截器内：
+  // 校时、强制换 Token、重新签名后，业务 fetch 只能拿到第二次响应。
+  const resignCalls = { token: 0, time: 0, business: 0 };
+  let firstRetryData = null;
+  const resign = makeContext({
+    calls: resignCalls,
+    tokenResponses: [
+      { key: 'resign-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' },
+      { key: 'resign-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' }
+    ],
+    timeResponse: { server_time: Math.floor(Date.now() / 1000), boot_id: 'boot-b', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' },
+    businessResponse: ({ init }) => {
+      if (resignCalls.business === 1) {
+        firstRetryData = init.headers.get('MA-RFW-Data');
+        return { status: 403, headers: { get(name) { return name === 'MA-RFW-Recover' ? 'token' : (name === 'MA-RFW-Retry' ? 'resign' : null); } } };
+      }
+      if (init._rfwRetried !== true) throw new Error('authorized retry did not carry one-shot marker');
+      const retryData = init.headers.get('MA-RFW-Data');
+      if (!retryData || retryData === firstRetryData) throw new Error('authorized retry reused original MA-RFW-Data');
+      return { status: 200, headers: { get() { return null; } } };
+    }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const resignResponse = await resign.window.fetch('/webapp/resign-once', { method: 'POST', body: '{"approved":true}' });
+  if (resignResponse.status !== 200 || resignCalls.business !== 2 || resignCalls.time !== 1 || resignCalls.token !== 2) {
+    throw new Error('authorized 403 was not repaired and replayed exactly once: ' + JSON.stringify(resignCalls));
+  }
+
+  // 缺少服务端授权头的 403 代表攻击/策略拒绝，绝不能校时、换 Token 或重放。
+  const attackCalls = { token: 0, time: 0, business: 0 };
+  const attack = makeContext({
+    calls: attackCalls,
+    businessResponse: () => ({ status: 403, headers: { get() { return null; } } })
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const attackResponse = await attack.window.fetch('/webapp/attack-deny', { method: 'GET' });
+  if (attackResponse.status !== 403 || attackCalls.business !== 1 || attackCalls.time !== 0 || attackCalls.token !== 1) {
+    throw new Error('unauthorized 403 unexpectedly triggered repair/replay: ' + JSON.stringify(attackCalls));
+  }
+
   // 后台挂起导致本地 Token 过期时，业务 fetch 必须先获取新 Token。
   const expiredCalls = { token: 0, business: 0 };
   const expired = makeContext({
     calls: expiredCalls,
     tokenResponses: [
-      { key: 'expired-old-key', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' },
-      { key: 'expired-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' }
+      { key: 'expired-old-key', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' },
+      { key: 'expired-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.9', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -209,5 +258,5 @@ function makeContext(options = {}) {
   if (!oldBlocked || oldCalls.business !== 0 || oldCalls.token !== 1 || oldCalls.alert !== '系统维护，请刷新页面。') {
     throw new Error('old server protocol guard failed: ' + JSON.stringify(oldCalls));
   }
-  console.log('PASS dynamic async/sync XHR, Token-outage XHR fail-closed, duplicate-load Token dedupe, same-origin Broker, boot auto-refresh, and old-protocol fail-closed');
+  console.log('PASS dynamic async/sync XHR, authorized one-shot fetch resign, unauthorized 403 no-retry, Token-outage XHR fail-closed, duplicate-load Token dedupe, same-origin Broker, boot auto-refresh, and old-protocol fail-closed');
 })().catch(err => { console.error(err); process.exit(1); });
