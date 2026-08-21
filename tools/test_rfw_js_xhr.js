@@ -13,11 +13,12 @@ function makeContext(options = {}) {
   const tokenResponses = options.tokenResponses || [{
     key: 'dynamic-test-key', expires_in: 1800,
     server_time: Math.floor(Date.now() / 1000),
-    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1'
+    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1'
   }];
   let tokenIndex = 0;
   const calls = options.calls || { token: 0, business: 0 };
   const listeners = {};
+  const timers = [];
   const window = {
     // 模拟攻击者在 RFW 脚本加载前篡改客户端全局变量。
     __RFW__: { loaded: true, forged: true },
@@ -26,6 +27,9 @@ function makeContext(options = {}) {
     fetch: function (url, init) {
       if (String(url).indexOf('/cgi-rfw/token') === 0) {
         calls.token++;
+        if (options.tokenFailure) {
+          return Promise.resolve({ ok: false, status: 503, json: () => Promise.reject(new Error('token unavailable')) });
+        }
         const token = tokenResponses[Math.min(tokenIndex++, tokenResponses.length - 1)];
         return Promise.resolve({ ok: true, json: () => Promise.resolve(token) });
       }
@@ -54,8 +58,10 @@ function makeContext(options = {}) {
     Promise, Math, Date,
     setInterval: function () { return 1; }, clearInterval: function () {},
     setTimeout: function (fn, delay) {
-      if (delay != null && delay < 100) Promise.resolve().then(fn);
-      return 1;
+      const timer = { fn, delay: delay == null ? 0 : delay };
+      timers.push(timer);
+      if (timer.delay < 100) Promise.resolve().then(fn);
+      return timers.length;
     },
     clearTimeout: function () {},
     crypto: {}, console: window.console
@@ -67,6 +73,13 @@ function makeContext(options = {}) {
     { filename: 'rfw.js' }
   );
   context.calls = calls;
+  context.runTimers = function (limit) {
+    const pending = timers.splice(0, timers.length);
+    for (const timer of pending) {
+      if (timer.delay <= limit) timer.fn();
+      else timers.push(timer);
+    }
+  };
   context.reloadSource = fs.readFileSync(path.join(__dirname, '..', 'rfw.js'), 'utf8');
   return context;
 }
@@ -112,8 +125,8 @@ function makeContext(options = {}) {
   const boot = makeContext({
     calls: bootCalls,
     tokenResponses: [
-      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' },
-      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' }
+      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' },
+      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -131,8 +144,8 @@ function makeContext(options = {}) {
   const recovery = makeContext({
     calls: recoveryCalls,
     tokenResponses: [
-      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' },
-      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' }
+      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' },
+      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' }
     ],
     businessResponse: () => ({ ok: false, status: 403, headers: { get(name) { return name === 'MA-RFW-Recover' ? 'token' : null; } } })
   });
@@ -151,8 +164,8 @@ function makeContext(options = {}) {
   const expired = makeContext({
     calls: expiredCalls,
     tokenResponses: [
-      { key: 'expired-old-key', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' },
-      { key: 'expired-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' }
+      { key: 'expired-old-key', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' },
+      { key: 'expired-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.8', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -167,6 +180,23 @@ function makeContext(options = {}) {
     throw new Error('background-expired token gate failed: ' + JSON.stringify(expiredCalls));
   }
 
+  // 真实 Chromium 多 iframe 场景发现：Token 503 后，异步 XHR 必须在
+  // 5 秒等待门禁超时后 fail-closed；绝不能原样调用原生 send 形成
+  // dynamic-sign-missing。这里直接断言 native MockXHR.sent 始终为 false。
+  const outageCalls = { token: 0, business: 0 };
+  const outage = makeContext({ calls: outageCalls, tokenFailure: true });
+  await new Promise(resolve => setImmediate(resolve));
+  const outageXhr = new outage.XMLHttpRequest();
+  outageXhr.open('GET', '/webapp/portal/SecurityCacheController/getServiceFrontend.do', true);
+  outageXhr.send(null);
+  await new Promise(resolve => setImmediate(resolve));
+  outage.runTimers(5000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  if (outageXhr.sent || outageCalls.business !== 0 || outageCalls.token < 2) {
+    throw new Error('token-outage async XHR was not fail-closed: ' + JSON.stringify({ calls: outageCalls, sent: outageXhr.sent }));
+  }
+
   // 旧服务端协议/版本必须 fail-closed，并只显示通用维护提示。
   const oldCalls = { token: 0, business: 0 };
   const old = makeContext({
@@ -179,5 +209,5 @@ function makeContext(options = {}) {
   if (!oldBlocked || oldCalls.business !== 0 || oldCalls.token !== 1 || oldCalls.alert !== '系统维护，请刷新页面。') {
     throw new Error('old server protocol guard failed: ' + JSON.stringify(oldCalls));
   }
-  console.log('PASS dynamic async/sync XHR, duplicate-load Token dedupe, same-origin Broker, boot auto-refresh, and old-protocol fail-closed');
+  console.log('PASS dynamic async/sync XHR, Token-outage XHR fail-closed, duplicate-load Token dedupe, same-origin Broker, boot auto-refresh, and old-protocol fail-closed');
 })().catch(err => { console.error(err); process.exit(1); });

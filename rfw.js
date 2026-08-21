@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.7"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.8"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -46,7 +46,7 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.7" }),
+      value: Object.freeze({ loaded: true, version: "4.3.8" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -339,7 +339,13 @@
           return buf;
         }).then(function (buf) {
           var secret = getSecret();
-          if (!secret) { _send.call(x, body); return; }
+          // dynamic-only 必须 fail-closed。Token 获取超时、失败或被
+          // 维护锁定后，绝不能把异步 XHR 原样交给原生 send，否则会
+          // 形成 dynamic-sign-missing → IP blocked 的连续拒绝链。
+          if (!secret || !isReady()) {
+            if (window.console) console.warn("[rfw.js] 异步 XHR 未获取到有效 Token，已阻止发送");
+            return;
+          }
           return makeSign(secret, meta.method, meta.url, buf, getClockOffset()).then(function (r) {
             try { x.setRequestHeader(H_DATA, r.ts + "." + r.nonce + "." + r.sign); } catch (e) {}
             _send.call(x, body);
@@ -371,7 +377,7 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
-  var CLIENT_VERSION = "4.3.7";
+  var CLIENT_VERSION = "4.3.8";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
   var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;
@@ -645,11 +651,13 @@
           if (resolved) return;
           resolved = true;
           if (reloadLocked) return;
-          if (window.console) console.warn("[rfw.js] 密钥获取超时(5s), 降级为无签名模式");
+          if (window.console) console.warn("[rfw.js] 密钥获取超时(5s)，停止未签名业务请求");
           if (!dynReady) {
             dynNoKey = true;
             dynKey   = null;
-            dynReady = true;
+            // 保持未就绪状态。fetch 会拒绝，XHR 会直接停止；二者都不
+            // 可以带着空 Header 触发 dynamic-sign-missing。
+            dynReady = false;
             if (retryTimer) clearTimeout(retryTimer);
             retryTimer = setTimeout(function () {
               retryTimer = null;
