@@ -446,14 +446,14 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     try: data=json.loads(result[1])
     except Exception: data={}
     add(out,"webui","dynamic token endpoint JSON",result[0],200,"body keys="+str(sorted(data.keys())))
-    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.9" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
+    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.10" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
     time_result=h.run(uri="/cgi-rfw/time",now=BASE_NOW)
     try: time_data=json.loads(time_result[1])
     except Exception: time_data={}
-    add(out,"webui","anonymous time endpoint returns server clock and boot_id",None if time_result[0]==200 and time_data.get("server_time")==int(BASE_NOW) and isinstance(time_data.get("boot_id"),str) and len(time_data.get("boot_id"))>0 and time_data.get("rfw_version")=="4.3.9" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"no Key issue or quota consumption")
+    add(out,"webui","anonymous time endpoint returns server clock and boot_id",None if time_result[0]==200 and time_data.get("server_time")==int(BASE_NOW) and isinstance(time_data.get("boot_id"),str) and len(time_data.get("boot_id"))>0 and time_data.get("rfw_version")=="4.3.10" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"no Key issue or quota consumption")
     add(out,"webui","time endpoint rejects non-GET",h.run(method="POST",uri="/cgi-rfw/time",now=BASE_NOW)[0],405,"method guard")
     page=h.run(uri="/cgi-rfw/config",ip="127.0.0.1")
-    add(out,"webui","version is v4.3.9",None if "<span>v4.3.9</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
+    add(out,"webui","version is v4.3.10",None if "<span>v4.3.10</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
     log_page=h.run(uri="/cgi-rfw/logs",ip="127.0.0.1")
     add(out,"webui","SNAP hidden in log renderer",None if "o.attack_method==='SNAP'" in log_page[1] else 500,None,"frontend defensive filter")
     log_dir=h.work/"logs"; log_dir.mkdir(exist_ok=True)
@@ -466,10 +466,10 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     except Exception: log_json={}
     log_lines=log_json.get("lines",[]) if isinstance(log_json,dict) else []
     add(out,"webui","SNAP filtered from log API",None if log_result[0]==200 and len(log_lines)==1 and all('SNAP' not in x for x in log_lines) else 500,None,"server-side log filter")
-    required_ids=["strict-api-path-tags","document-path-tags","strict-api-path-input","document-path-input","cfg-cookie-document-require-fetch","help-text"]
+    required_ids=["strict-api-path-tags","document-path-tags","strict-api-path-input","document-path-input","cfg-cookie-document-require-fetch","cfg-cookie-ratio-req","cfg-cookie-ratio-min","help-text"]
     hidden_ids=["cfg-key-mode","cfg-dynamic-strict-sign","cfg-dynamic-sign-ratio-fail","cfg-dynamic-allow-cookie-fallback","cfg-dynamic-cookie-tag-hex","cfg-cookie-name","cfg-cookie-bootstrap","cfg-cookie-safe-methods","cfg-replay-enabled"]
     add(out,"webui","config page uses Chinese editable fields",None if all(x in page[1] for x in required_ids) and all(x not in page[1] for x in hidden_ids) and "Cookie" in page[1] else 500,None,"visible="+str(required_ids)+", hidden_fixed="+str(hidden_ids))
-    save_body=json.dumps({"key_mode":"static","secret":"attacker-secret","dynamic_strict_sign":False,"dynamic_sign_ratio_fail":False,"dynamic_allow_legacy_secret":True,"dynamic_allow_legacy_cookie":True,"dynamic_allow_cookie_fallback":True,"strict_api_paths":["/api/"],"dynamic_document_paths":["/","/webapp/"],"dynamic_cookie_tag_hex":31,"cookie_document_require_fetch_metadata":True})
+    save_body=json.dumps({"key_mode":"static","secret":"attacker-secret","dynamic_strict_sign":False,"dynamic_sign_ratio_fail":False,"dynamic_allow_legacy_secret":True,"dynamic_allow_legacy_cookie":True,"dynamic_allow_cookie_fallback":True,"strict_api_paths":["/api/"],"dynamic_document_paths":["/","/webapp/"],"dynamic_cookie_tag_hex":31,"cookie_document_require_fetch_metadata":True,"cookie_ratio_req":17,"cookie_ratio_min":0.75})
     saved=h.run(method="POST",uri="/cgi-rfw/api/config",body=save_body.encode(),ip="127.0.0.1")
     saved_json={}
     try: saved_json=json.loads(saved[1])
@@ -484,7 +484,9 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     persisted_again_text=(h.work/"config.json").read_text()
     persisted_again=json.loads(persisted_again_text)
     second_order=list(persisted_again.keys())
-    add(out,"webui","config save keeps standard JSON remarks, indentation and stable schema order",None if saved_json.get("success") is True and saved_again[0]==200 and all(k not in persisted for k in fixed_keys) and persisted.get("strict_api_paths")==["/api/"] and persisted.get("dynamic_document_paths")==["/","/webapp/"] and persisted.get("dynamic_allow_cookie_fallback") is True and "__COMMENT_CONFIG_FORMAT" in persisted and "__COMMENT_RELEASE" in persisted and first_order_ok and second_order==first_order and "//" not in persisted_text and "\n  \"" in persisted_text and persisted_text==persisted_again_text else 500,None,"fixed fields removed; standard JSON remarks and indentation preserved across repeated saves")
+    section_gaps=["__COMMENT_DYNAMIC_DOCUMENT_PATHS","__COMMENT_STRICT_API_PATHS","__COMMENT_DYNAMIC_KEY","__COMMENT_COOKIE_FALLBACK","__COMMENT_COOKIE_REPLAY","__COMMENT_SIGN","__COMMENT_SEQUENCE","__COMMENT_REPLAY","__COMMENT_FAILURE","__COMMENT_ADMIN"]
+    comment_gaps_ok=all('\n\n  "'+key+'"' in persisted_text for key in section_gaps)
+    add(out,"webui","config save keeps standard JSON remarks, section gaps, mappings and stable schema order",None if saved_json.get("success") is True and saved_again[0]==200 and all(k not in persisted for k in fixed_keys) and persisted.get("strict_api_paths")==["/api/"] and persisted.get("dynamic_document_paths")==["/","/webapp/"] and persisted.get("dynamic_allow_cookie_fallback") is True and persisted.get("cookie_ratio_req")==17 and persisted.get("cookie_ratio_min")==0.75 and "__COMMENT_CONFIG_FORMAT" in persisted and "__COMMENT_RELEASE" in persisted and first_order_ok and second_order==first_order and "//" not in persisted_text and "\n  \"" in persisted_text and comment_gaps_ok and persisted_text==persisted_again_text else 500,None,"fixed fields removed; all editable mappings plus standard JSON remarks, section gaps and indentation preserved across repeated saves")
     bad_body=json.dumps({"sign_enabled":False})
     bad=h.run(method="POST",uri="/cgi-rfw/api/config",body=bad_body.encode(),ip="127.0.0.1")
     add(out,"webui","reject dynamic strict with sign disabled",bad[0],400,"configuration contradiction rejected")
@@ -581,9 +583,9 @@ def main():
     run_core_tests(repo,cfg,checks); run_cookie_tests(repo,cfg,checks); run_webui_test(repo,cfg,checks); run_saz_test(repo,cfg,saz,checks); run_performance(repo,cfg,checks)
     summary={"total":len(checks),"passed":sum(x.status=="PASS" for x in checks),"failed":sum(x.status=="FAIL" for x in checks),"skipped":sum(x.status=="SKIP" for x in checks),"checks":[asdict(x) for x in checks],"config":str(cfg),"saz":str(saz) if saz else None}
     Path(args.json_out).write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# RFW v4.3.9 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
+    lines=["# RFW v4.3.10 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
     for x in checks: lines.append(f"| {x.suite} | {x.name} | `{x.observed}` | `{x.expected}` | **{x.status}** | {x.detail} |")
-    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.9 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
+    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.10 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
     Path(args.md_out).write_text("\n".join(lines)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2)); return 0 if summary["failed"]==0 else 1
 

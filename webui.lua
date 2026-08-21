@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.9"
+local VERSION = "4.3.10"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -20,7 +20,7 @@ local FIXED_CONFIG_KEYS = {
 }
 local CONFIG_COMMENT_FIELDS = {
     __COMMENT_CONFIG_FORMAT = "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
-    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.9。请与 Lua、WebUI、rfw.js 使用同一发布包。",
+    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.10。请与 Lua、WebUI、rfw.js 使用同一发布包。",
     __COMMENT_DYNAMIC_DOCUMENT_PATHS = "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
     __COMMENT_STRICT_API_PATHS = "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
     __COMMENT_DYNAMIC_KEY = "dynamic 密钥生命周期与发放限制。",
@@ -78,7 +78,14 @@ local function json_pretty(value, level)
     end)
     local parts = {}
     for _, k in ipairs(keys) do
-        parts[#parts + 1] = child_indent .. cjson.encode(tostring(k)) .. ": " .. json_pretty(value[k], level + 1)
+        local prefix = child_indent
+        local is_section_comment = level == 0 and type(k) == "string"
+            and k:sub(1, 10) == "__COMMENT_"
+            and k ~= "__COMMENT_CONFIG_FORMAT"
+            and k ~= "__COMMENT_RELEASE"
+        -- 顶层业务备注开始一个新段；在属性字符串前加换行，避免破坏 JSON 逗号结构。
+        if is_section_comment then prefix = "\n" .. prefix end
+        parts[#parts + 1] = prefix .. cjson.encode(tostring(k)) .. ": " .. json_pretty(value[k], level + 1)
     end
     return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
 end
@@ -607,6 +614,18 @@ local CONFIG_HTML = [[<!DOCTYPE html>
         <input type="text" id="cfg-sign-ratio-min" value="0.5">
         <span class="help-text" title="0.5 表示至少一半受保护请求应携带 MA-RFW-Data">建议保持 0.5 或更高</span>
       </div>
+      <div class="form-group">
+        <label title="Cookie 兼容例外的比例检测起点">Cookie 比例统计起始请求数</label>
+        <input type="number" id="cfg-cookie-ratio-req" value="10">
+        <span class="help-text" title="仅手工开启 Cookie fallback 时参与后端比例检测">默认关闭 Cookie fallback 时不生效</span>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label title="Cookie 兼容例外允许的最低有效比例">最低 Cookie 比例</label>
+        <input type="text" id="cfg-cookie-ratio-min" value="0.5">
+        <span class="help-text" title="仅手工开启 Cookie fallback 时参与后端比例检测">建议保持 0.5 或更高</span>
+      </div>
       <div class="form-group"></div>
     </div>
   </div>
@@ -878,6 +897,7 @@ function loadConfig(){
   fetch('/cgi-rfw/api/config').then(function(r){return r.json()}).then(function(c){
     setVal('cfg-sign-window',c.sign_window);
     setVal('cfg-sign-ratio-req',c.sign_ratio_req);setVal('cfg-sign-ratio-min',c.sign_ratio_min);
+    setVal('cfg-cookie-ratio-req',c.cookie_ratio_req);setVal('cfg-cookie-ratio-min',c.cookie_ratio_min);
     strictApiData=Array.isArray(c.strict_api_paths)?c.strict_api_paths.slice():[];renderPathTags('strict-api-path-tags',strictApiData);
     documentPathData=Array.isArray(c.dynamic_document_paths)?c.dynamic_document_paths.slice():['/','/webapp/'];renderPathTags('document-path-tags',documentPathData);
     setVal('cfg-key-ttl',c.key_ttl);
@@ -905,6 +925,8 @@ function saveConfig(){
   cfg.sign_window=parseInt(getVal('cfg-sign-window'))||60;
   cfg.sign_ratio_req=parseInt(getVal('cfg-sign-ratio-req'))||10;
   cfg.sign_ratio_min=parseFloat(getVal('cfg-sign-ratio-min'))||0.5;
+  cfg.cookie_ratio_req=parseInt(getVal('cfg-cookie-ratio-req'))||10;
+  cfg.cookie_ratio_min=parseFloat(getVal('cfg-cookie-ratio-min'))||0.5;
   cfg.strict_api_paths=strictApiData.slice();
   cfg.dynamic_document_paths=documentPathData.slice();
   cfg.key_ttl=parseInt(getVal('cfg-key-ttl'))||1800;
