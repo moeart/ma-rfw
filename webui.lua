@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.8"
+local VERSION = "4.3.9"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -20,7 +20,7 @@ local FIXED_CONFIG_KEYS = {
 }
 local CONFIG_COMMENT_FIELDS = {
     __COMMENT_CONFIG_FORMAT = "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
-    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.8。请与 Lua、WebUI、rfw.js 使用同一发布包。",
+    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.9。请与 Lua、WebUI、rfw.js 使用同一发布包。",
     __COMMENT_DYNAMIC_DOCUMENT_PATHS = "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
     __COMMENT_STRICT_API_PATHS = "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
     __COMMENT_DYNAMIC_KEY = "dynamic 密钥生命周期与发放限制。",
@@ -1461,6 +1461,32 @@ local function handle_token()
 end
 
 -- ============================================================
+-- Time Endpoint (anonymous, no Key issue or quota consumption)
+-- ============================================================
+
+local function handle_time()
+    ngx.header["MA-RFW-Version"] = VERSION
+    ngx.header["MA-RFW-Protocol"] = PROTOCOL_VERSION
+    ngx.header["Cache-Control"] = "no-store"
+    ngx.header["Pragma"] = "no-cache"
+    ngx.header["X-Content-Type-Options"] = "nosniff"
+
+    if ngx.req.get_method() ~= "GET" then
+        return json_response({error = "method_not_allowed"}, 405)
+    end
+
+    local core = _G.ma_rfw_core
+    local boot_id = (core and core.get_boot_id and core.get_boot_id()) or ""
+    if boot_id ~= "" then ngx.header["MA-RFW-Boot-ID"] = boot_id end
+    return json_response({
+        server_time = ngx.time(),
+        boot_id = boot_id,
+        rfw_version = VERSION,
+        rfw_protocol = PROTOCOL_VERSION
+    }, 200)
+end
+
+-- ============================================================
 -- Router
 -- ============================================================
 
@@ -1468,6 +1494,9 @@ function _M.run()
     local uri = ngx.var.uri
 
     -- 匿名接口绕过 admin_check
+    if uri == "/cgi-rfw/time" then
+        return handle_time()
+    end
     if uri == "/cgi-rfw/token" then
         return handle_token()
     end

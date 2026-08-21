@@ -55,7 +55,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.8 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.9 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true
@@ -680,10 +680,15 @@ local function deny(reason, detail)
     load_html()
     ngx.status = ngx.HTTP_FORBIDDEN
     ngx.header["Content-Type"] = "text/html; charset=utf-8"
-    if reason == "dynamic-key-missing" or reason == "sign-expired" or reason == "sign-invalid" then
-        -- 浏览器后台挂起后，页面可能在恢复时携带已过期/旧 Key。
-        -- 仅通知已加载 rfw.js 的同源客户端强制取新 Token；不自动重放原请求。
+    if reason == "dynamic-key-missing" or reason == "sign-expired" then
+        -- 这两个拒绝均发生在 access 阶段，ngx.exit 前不会把请求交给业务后端：
+        -- 1) sign-expired：后台挂起后带着过期的客户端时钟签名；
+        -- 2) dynamic-key-missing：reload/Key 生命周期后服务端已无对应动态 Key。
+        -- 仅向已加载同源 rfw.js 的客户端授权“校时/换 Token 后原请求重签一次”。
+        -- sign-invalid、nonce-replay、body-mismatch、blocked、ratio-low 等攻击/策略
+        -- 拒绝绝不带该头，因此不能触发客户端自动重放。
         ngx.header["MA-RFW-Recover"] = "token"
+        ngx.header["MA-RFW-Retry"] = "resign"
     end
     if DEBUG then
         local panel = debug_panel(reason, detail)

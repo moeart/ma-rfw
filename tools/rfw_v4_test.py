@@ -265,7 +265,7 @@ function(method,uri,body,cookie,rfwd,now,ip,ua,accept,dest,rfw_on,response_ct)
   ngx.req.get_method=function() return method or "GET" end
   if response_ct then ngx.header["Content-Type"] = response_ct end
   core.run(); if core.header_filter then core.header_filter() end
-  return _exit_code,table.concat(_says),ngx.header["Set-Cookie"],ngx.header["MA-RFW-Recover"]
+  return _exit_code,table.concat(_says),ngx.header["Set-Cookie"],ngx.header["MA-RFW-Recover"],ngx.header["MA-RFW-Retry"]
 end
 ''')
         self.rotate_lua = self.lua.eval('function(ip,uh) return core.rotate_key(ip,uh) end')
@@ -309,10 +309,12 @@ def run_core_tests(repo: Path, config_path: Path, out: list[Check]):
     expired_result = h.run(uri=req_uri,rfwd=expired_header)
     add(out,"dynamic","sign-expired emits recovery signal",expired_result[0],403,"status")
     add(out,"dynamic","sign-expired MA-RFW-Recover",expired_result[3],"token","frontend refresh signal")
+    add(out,"dynamic","sign-expired authorizes one resign",expired_result[4],"resign","access-stage retry permission")
     invalid_header = good[:-1] + ("0" if good[-1] != "0" else "1")
     invalid_result = h.run(uri=req_uri,rfwd=invalid_header)
-    add(out,"dynamic","sign-invalid emits recovery signal",invalid_result[0],403,"status")
-    add(out,"dynamic","sign-invalid MA-RFW-Recover",invalid_result[3],"token","frontend refresh signal")
+    add(out,"dynamic","sign-invalid is denied",invalid_result[0],403,"status")
+    add(out,"dynamic","sign-invalid has no recovery authorization",invalid_result[3],None,"cryptographic failure must not refresh/replay")
+    add(out,"dynamic","sign-invalid has no resign authorization",invalid_result[4],None,"cryptographic failure must not replay")
     add(out,"dynamic","delete _RFW does not bypass valid MA-RFW-Data",h.run(uri=req_uri,rfwd=good,cookie=None)[0],None,"Header credential remains sufficient")
     valid_cookie = cookie_value(dyn_key,"delete-rfwd-cookie",1,int(BASE_NOW*1000),32)
     add(out,"dynamic","delete MA-RFW-Data with Cookie is rejected",h.run(uri=req_uri,cookie=valid_cookie)[0],403,"MA-RFW-Data-only gray-release profile")
@@ -324,7 +326,9 @@ def run_core_tests(repo: Path, config_path: Path, out: list[Check]):
     add(out,"dynamic","old static secret MA-RFW-Data",h.run(uri=req_uri,rfwd=old)[0],403,"legacy secret fallback disabled")
     other_key = h.key("198.51.100.21","Other-UA/1.0")
     stolen = api_headers(other_key,"GET",req_uri,body,int(BASE_NOW),"dyn-other")
-    add(out,"dynamic","wrong IP/UA dynamic key",h.run(uri=req_uri,rfwd=stolen,ip="198.51.100.22",ua="Victim-UA/1.0")[0],403,"key record missing is strict deny")
+    missing_key_result = h.run(uri=req_uri,rfwd=stolen,ip="198.51.100.22",ua="Victim-UA/1.0")
+    add(out,"dynamic","wrong IP/UA dynamic key",missing_key_result[0],403,"key record missing is strict deny")
+    add(out,"dynamic","dynamic-key-missing authorizes one resign",missing_key_result[4],"resign","access-stage reload/key recovery")
     add(out,"dynamic","dynamic Cookie valid on document",h.run(uri=doc_path,cookie=cookie_value(dyn_key,"dyn-sid",1,int(BASE_NOW*1000),32),accept="text/html",dest="document")[0],None,"dynamic Cookie HMAC; API remains strict Header Gate")
     sync_cookie = cookie_value(dyn_key,"sync-sid",1,int(BASE_NOW*1000),32)
     add(out,"dynamic","Cookie fallback disabled by default",h.run(uri="/webapp/portal/DataDictController/getDevToolMd5.do",cookie=sync_cookie,accept="application/json",dest="empty")[0],403,"MA-RFW-Data-only gray-release profile")
@@ -442,9 +446,14 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     try: data=json.loads(result[1])
     except Exception: data={}
     add(out,"webui","dynamic token endpoint JSON",result[0],200,"body keys="+str(sorted(data.keys())))
-    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.8" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
+    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.9" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
+    time_result=h.run(uri="/cgi-rfw/time",now=BASE_NOW)
+    try: time_data=json.loads(time_result[1])
+    except Exception: time_data={}
+    add(out,"webui","anonymous time endpoint returns server clock and boot_id",None if time_result[0]==200 and time_data.get("server_time")==int(BASE_NOW) and isinstance(time_data.get("boot_id"),str) and len(time_data.get("boot_id"))>0 and time_data.get("rfw_version")=="4.3.9" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"no Key issue or quota consumption")
+    add(out,"webui","time endpoint rejects non-GET",h.run(method="POST",uri="/cgi-rfw/time",now=BASE_NOW)[0],405,"method guard")
     page=h.run(uri="/cgi-rfw/config",ip="127.0.0.1")
-    add(out,"webui","version is v4.3.8",None if "<span>v4.3.8</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
+    add(out,"webui","version is v4.3.9",None if "<span>v4.3.9</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
     log_page=h.run(uri="/cgi-rfw/logs",ip="127.0.0.1")
     add(out,"webui","SNAP hidden in log renderer",None if "o.attack_method==='SNAP'" in log_page[1] else 500,None,"frontend defensive filter")
     log_dir=h.work/"logs"; log_dir.mkdir(exist_ok=True)
@@ -572,9 +581,9 @@ def main():
     run_core_tests(repo,cfg,checks); run_cookie_tests(repo,cfg,checks); run_webui_test(repo,cfg,checks); run_saz_test(repo,cfg,saz,checks); run_performance(repo,cfg,checks)
     summary={"total":len(checks),"passed":sum(x.status=="PASS" for x in checks),"failed":sum(x.status=="FAIL" for x in checks),"skipped":sum(x.status=="SKIP" for x in checks),"checks":[asdict(x) for x in checks],"config":str(cfg),"saz":str(saz) if saz else None}
     Path(args.json_out).write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# RFW v4.3.8 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
+    lines=["# RFW v4.3.9 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
     for x in checks: lines.append(f"| {x.suite} | {x.name} | `{x.observed}` | `{x.expected}` | **{x.status}** | {x.detail} |")
-    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.8 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
+    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.9 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
     Path(args.md_out).write_text("\n".join(lines)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2)); return 0 if summary["failed"]==0 else 1
 
