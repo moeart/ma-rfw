@@ -13,7 +13,7 @@ function makeContext(options = {}) {
   const tokenResponses = options.tokenResponses || [{
     key: 'dynamic-test-key', expires_in: 1800,
     server_time: Math.floor(Date.now() / 1000),
-    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1'
+    cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1'
   }];
   let tokenIndex = 0;
   const calls = options.calls || { token: 0, business: 0 };
@@ -112,8 +112,8 @@ function makeContext(options = {}) {
   const boot = makeContext({
     calls: bootCalls,
     tokenResponses: [
-      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' },
-      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' }
+      { key: 'key-a', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' },
+      { key: 'key-b', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' }
     ]
   });
   await new Promise(resolve => setImmediate(resolve));
@@ -131,8 +131,8 @@ function makeContext(options = {}) {
   const recovery = makeContext({
     calls: recoveryCalls,
     tokenResponses: [
-      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' },
-      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.6', rfw_protocol: 'MA-RFW-1' }
+      { key: 'recovery-old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' },
+      { key: 'recovery-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-b', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' }
     ],
     businessResponse: () => ({ ok: false, status: 403, headers: { get(name) { return name === 'MA-RFW-Recover' ? 'token' : null; } } })
   });
@@ -144,6 +144,27 @@ function makeContext(options = {}) {
   await new Promise(resolve => setImmediate(resolve));
   if (recoveryCalls.token !== 2 || recoveryCalls.business !== 2) {
     throw new Error('MA-RFW-Recover did not force fresh Token: ' + JSON.stringify(recoveryCalls));
+  }
+
+  // 后台挂起导致本地 Token 过期时，业务 fetch 必须先获取新 Token。
+  const expiredCalls = { token: 0, business: 0 };
+  const expired = makeContext({
+    calls: expiredCalls,
+    tokenResponses: [
+      { key: 'expired-old-key', expires_in: 1, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' },
+      { key: 'expired-new-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.7', rfw_protocol: 'MA-RFW-1' }
+    ]
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const savedDateNow = Date.now;
+  const resumeNow = savedDateNow() + 5000;
+  expired.Date.now = () => resumeNow;
+  await expired.window.fetch('/webapp/background-expired', { method: 'GET' });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  expired.Date.now = savedDateNow;
+  if (expiredCalls.token !== 2 || expiredCalls.business !== 1) {
+    throw new Error('background-expired token gate failed: ' + JSON.stringify(expiredCalls));
   }
 
   // 旧服务端协议/版本必须 fail-closed，并只显示通用维护提示。

@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.6"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.7"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -46,7 +46,7 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.6" }),
+      value: Object.freeze({ loaded: true, version: "4.3.7" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -294,7 +294,10 @@
           // 不把未签名请求交给服务端触发连续 403。
           try {
             var syncSecret = getSecret();
-            if (!syncSecret || !isReady()) return;
+            if (!syncSecret || !isReady()) {
+              fetchAndApplyToken();
+              return;
+            }
             if (syncSecret && isReady()) {
               var syncBuf;
               if (body == null) {
@@ -368,7 +371,7 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
-  var CLIENT_VERSION = "4.3.6";
+  var CLIENT_VERSION = "4.3.7";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
   var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;
@@ -657,17 +660,22 @@
           }
           resolve();
         }, 5000);
-        pendingQueue.push(function () {
-          if (resolved) return;
-          resolved = true;
-          clearTimeout(timer);
-          resolve();
-        });
+          pendingQueue.push(function () {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            resolve();
+          });
+          // 后台挂起可能冻结 refreshTimer；业务请求恢复时主动拉取
+          // 新 Token，不能只等待一个已经被冻结的定时器。
+          fetchAndApplyToken();
       });
     },
     function () { return (dynNoKey || reloadLocked) ? null : dynKey; },
     function () { return dynClockOff; },
-    function () { return dynReady && !reloadLocked; }
+    function () {
+      return dynReady && !reloadLocked && !!dynKey && Date.now() <= dynExpiresAt - 30000;
+    }
   );
 
   // 自动恢复: 页面可见/focus 时重新取 token

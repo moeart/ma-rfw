@@ -55,7 +55,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.6 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.7 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true
@@ -680,7 +680,9 @@ local function deny(reason, detail)
     load_html()
     ngx.status = ngx.HTTP_FORBIDDEN
     ngx.header["Content-Type"] = "text/html; charset=utf-8"
-    if reason == "dynamic-key-missing" then
+    if reason == "dynamic-key-missing" or reason == "sign-expired" or reason == "sign-invalid" then
+        -- 浏览器后台挂起后，页面可能在恢复时携带已过期/旧 Key。
+        -- 仅通知已加载 rfw.js 的同源客户端强制取新 Token；不自动重放原请求。
         ngx.header["MA-RFW-Recover"] = "token"
     end
     if DEBUG then
