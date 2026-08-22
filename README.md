@@ -1,8 +1,8 @@
-# MA-RFW — MoeArt Replay Firewall v4.3.11
+# MA-RFW — MoeArt Replay Firewall v4.3.12
 
 针对浏览器内嵌前端（非 SSR）的接口重放/伪造攻击防护。v4.3.10 在 v4.3.9 的受控恢复基础上，修正 WebUI 配置字段与后端配置键的映射，并让保存后的标准 JSON 以中文备注段落分隔，便于人工审阅。复杂 WebApp 在后台停留半小时以上产生的可恢复 403 仍由服务器在 access 阶段明确授权前端校时、换 Token 并重生原请求一次；业务 fetch/XHR 只接收最终响应。Token 获取失败或超时后，异步 XHR 仍 fail-closed，不会原样发送无签名请求。前端 `rfw.js` 对每个同源请求做 HMAC-SHA256 签名，nginx 侧 `ma_rfw.lua` 严格校验；无签名请求走行为兜底（Cookie 签名 + 会话序列号 + 相同请求指纹 + 覆盖率判定），支持按 IP 记失败并封禁。
 
-> **v4.3.11 当前修复**：同源 iframe 在强制 reload 后先成功校时、换 Token 和受控重签时，主框架及其他已加载的 rfw.js 上下文会在下一次签名前同步顶层 Token Broker 的最新有效 Token；Broker 请求进行中则等待该共享 Promise，绝不以本地旧 Key 继续签名并触发 `sign-invalid`/封禁链。
+> **v4.3.12 当前修复**：Status 的“今日访问量”和历史趋势图统一采用当天基线与当天 SNAP 的 `requests_today`；不再将运行期长期累计 `requests` 伪装为当日访问量。此修正不改变请求/响应字段、签名格式或恢复语义，协议版本保持 **MA-RFW-1**。
 
 ## 特性
 

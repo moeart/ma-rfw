@@ -55,7 +55,7 @@ do
     config.html_file = plugin_dir .. "/blocked.html"
 end
 
--- v4.3.11 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
+-- v4.3.12 dynamic-only：以下安全边界不可通过 config.json 或 WebUI 修改。
 local KEY_MODE = "dynamic"
 local DYN_STRICT_SIGN = true
 local SIGN_ENABLED = true
@@ -425,6 +425,27 @@ local function get_stat(k)
     return store:get(STATS_PREFIX .. k) or 0
 end
 
+-- 访问量是长期累计计数；Status 展示和当日 SNAP 必须减去当天开始时基线。
+-- 本函数在受保护请求计数之前执行，因此跨日的第一个请求不会被基线吞掉。
+local function refresh_day_baseline()
+    if not store then return 0 end
+    local today = os.date("%Y-%m-%d")
+    local current = get_stat("requests")
+    local day_key = get_stat("day_key")
+    local baseline = get_stat("day_baseline")
+    if day_key ~= today or current < baseline then
+        baseline = (day_key == today) and 0 or current
+        set_stat("day_key", today)
+        set_stat("day_baseline", baseline)
+    end
+    return math.max(0, current - baseline)
+end
+
+local function get_requests_today()
+    if not store or get_stat("day_key") ~= os.date("%Y-%m-%d") then return 0 end
+    return math.max(0, get_stat("requests") - get_stat("day_baseline"))
+end
+
 -- ===== 统计持久化: nginx 重启后恢复计数, 保证当日累计跨重启连续 =====
 local PERSIST_KEYS = {
     "requests", "signed_ok", "cookie_ok", "cookie_issued",
@@ -471,11 +492,12 @@ local function init_shared_stats()
     if is_new then restore_stats() end
     store:add(STATS_PREFIX .. "prev_requests", 0, 0)
     if is_new then
-        -- 全新启动(含重启): 计数器已归零, 当日基线也从 0 开始
+        -- 恢复持久化的长期累计后，若已跨日，当前累计即成为新一天的基线。
         local dk = get_stat("day_key")
-        if dk == 0 or dk == "" then
-            store:set(STATS_PREFIX .. "day_key", os.date("%Y-%m-%d"), 0)
-            store:set(STATS_PREFIX .. "day_baseline", 0, 0)
+        local today = os.date("%Y-%m-%d")
+        if dk ~= today then
+            store:set(STATS_PREFIX .. "day_key", today, 0)
+            store:set(STATS_PREFIX .. "day_baseline", get_stat("requests"), 0)
         end
     else
         store:add(STATS_PREFIX .. "day_key", "", 0)
@@ -811,20 +833,7 @@ sweep = function()
         local snap_interval = SNAP_LOG_INTERVAL
         local last_snap = get_stat("snap_log_ts")
         if snap_interval <= 0 or (ngx_time() - last_snap) >= snap_interval then
-            -- 当日累计: 跨天或重启(counter 回退)时重置基线
-            local today = os.date("%Y-%m-%d")
-            local day_key = get_stat("day_key")
-            local baseline = get_stat("day_baseline")
-            if day_key ~= today or req_now < baseline then
-                if day_key == today then
-                    baseline = 0
-                else
-                    baseline = req_now
-                end
-                set_stat("day_key", today)
-                set_stat("day_baseline", baseline)
-            end
-            local requests_today = req_now - baseline
+            local requests_today = refresh_day_baseline()
             local snap_parts = {}
             local snap_keys = {"requests","signed_ok","cookie_ok","cookie_issued",
                                "static_ok","blocked_hit","cookie_replay","cookie_stale",
@@ -1208,13 +1217,15 @@ function _M.run()
     end
     rfw_debug("enter uri=" .. uri)
 
-    incr_stat("requests", 1)
-
     if not initialized then
         initialized = true
         init_shared_stats()
         if not schedule_sweep() then initialized = false end
     end
+
+    -- 先完成跨日基线切换，再记本次访问，保证当日首个请求被计入今日。
+    refresh_day_baseline()
+    incr_stat("requests", 1)
 
     if not store then
         incr_stat("backend_fail", 1)
@@ -1512,6 +1523,13 @@ function _M.check()
 end
 
 _M.stats = stats
+function _M.get_today_stats()
+    return {
+        day_key = get_stat("day_key"),
+        requests_today = get_requests_today(),
+        requests_total = get_stat("requests"),
+    }
+end
 function _M.header_filter()
     local pc = ngx.ctx.rfw_pending_cookie
     if not pc then return end

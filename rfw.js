@@ -15,7 +15,7 @@
  *
  * 部署:
  *   通过 /cgi-rfw/rfw.min.js 加载；服务端只提供 dynamic-only 脚本和 token 端点：
- *     <script src="/cgi-rfw/rfw.min.js?v4.3.11"></script>
+ *     <script src="/cgi-rfw/rfw.min.js?v4.3.12"></script>
  *
  *   dynamic key 不写入静态文件，也不放入 window 全局变量。
  */
@@ -46,7 +46,7 @@
   // window.__RFW__ 不能改变服务端 Header Gate 的安全结论。
   try {
     Object.defineProperty(window, "__RFW__", {
-      value: Object.freeze({ loaded: true, version: "4.3.11" }),
+      value: Object.freeze({ loaded: true, version: "4.3.12" }),
       writable: false, configurable: false, enumerable: false
     });
   } catch (e) {}
@@ -583,7 +583,7 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
-  var CLIENT_VERSION = "4.3.11";
+  var CLIENT_VERSION = "4.3.12";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
   var serverProtocol = tokenBroker && tokenBroker.protocol ? tokenBroker.protocol : null;

@@ -1,6 +1,6 @@
 {
   "__COMMENT_CONFIG_FORMAT": "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
-  "__COMMENT_RELEASE": "Replay Firewall 发布版本：v4.3.11。请与 Lua、WebUI、rfw.js 使用同一发布包。",
+  "__COMMENT_RELEASE": "Replay Firewall 发布版本：v4.3.12。请与 Lua、WebUI、rfw.js 使用同一发布包。",
   "__COMMENT_DYNAMIC_DOCUMENT_PATHS": "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
   "dynamic_document_paths": [
     "/",

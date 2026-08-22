@@ -4,7 +4,7 @@ local cjson = require("cjson")
 
 local _M = {}
 
-local VERSION = "4.3.11"
+local VERSION = "4.3.12"
 local PROJECT = "MA-RFW"
 local BRAND_COLOR = "#8b5cf6"
 
@@ -20,7 +20,7 @@ local FIXED_CONFIG_KEYS = {
 }
 local CONFIG_COMMENT_FIELDS = {
     __COMMENT_CONFIG_FORMAT = "标准 JSON；所有以 __ 开头的字段都是备注，运行时会忽略。",
-    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.11。请与 Lua、WebUI、rfw.js 使用同一发布包。",
+    __COMMENT_RELEASE = "Replay Firewall 发布版本：v4.3.12。请与 Lua、WebUI、rfw.js 使用同一发布包。",
     __COMMENT_DYNAMIC_DOCUMENT_PATHS = "文档 HTML 精确路径；只能填写确定返回 HTML 的入口。",
     __COMMENT_STRICT_API_PATHS = "额外严格 API 前缀；留空表示所有非文档请求按严格策略处理。",
     __COMMENT_DYNAMIC_KEY = "dynamic 密钥生命周期与发放限制。",
@@ -207,6 +207,16 @@ local function get_rfw_stats()
                 end
             end
             stats.start_ts = store:get(prefix .. "start_ts") or os.time()
+            stats.requests = stats.requests or 0
+            if core.get_today_stats then
+                local today = core.get_today_stats()
+                stats.requests_today = today.requests_today or 0
+                stats.day_key = today.day_key or ""
+                stats.requests_total = today.requests_total or stats.requests or 0
+            else
+                stats.requests_today = stats.requests or 0
+                stats.requests_total = stats.requests or 0
+            end
             return stats
         end
         if core.stats then return core.stats end
@@ -396,8 +406,8 @@ local STATUS_HTML = [[<!DOCTYPE html>
 </head><body>
 ]] .. NAV .. [[
 <main>
-  <div class="metrics">
-    <div class="metric-card purple"><div class="label">请求总数</div><div class="value" id="m-total">-</div></div>
+    <div class="metrics">
+    <div class="metric-card purple"><div class="label">今日访问量</div><div class="value" id="m-total">-</div></div>
     <div class="metric-card green"><div class="label">签名校验通过</div><div class="value" id="m-signed">-</div></div>
     <div class="metric-card yellow"><div class="label">cookie 兜底放行</div><div class="value" id="m-cookie">-</div></div>
     <div class="metric-card red"><div class="label">封禁命中</div><div class="value" id="m-blocked">-</div></div>
@@ -518,7 +528,7 @@ function renderSys(s){
 function refresh(){
   fetch('/cgi-rfw/api/stats?t='+Date.now()).then(function(r){return r.json()}).then(function(d){
     var s=d.stats||{};var bl=d.block_log||{};
-    document.getElementById('m-total').textContent=fmt(s.requests);
+    document.getElementById('m-total').textContent=fmt(s.requests_today);
     document.getElementById('m-signed').textContent=fmt(s.signed_ok);
     document.getElementById('m-cookie').textContent=fmt(s.cookie_ok);
     document.getElementById('m-blocked').textContent=fmt(s.blocked_hit);
@@ -546,29 +556,12 @@ function loadHistory(days){
       (Array.isArray(d.days)?d.days:[]).forEach(function(dd){
         dates.push(dd.date);
         denied.push(dd.denied_total);
-        var snaps=Array.isArray(dd.snapshots)?dd.snapshots:[];
-        var totalReq=0;
-        if(snaps.length>0){
-          var lastSnap=snaps[snaps.length-1];
-          if(lastSnap.requests_today!=null){
-            totalReq=lastSnap.requests_today;
-          }else{
-            for(var k=0;k<snaps.length;k++){
-              if(snaps[k].requests==null)continue;
-              if(k===0){totalReq+=snaps[k].requests}
-              else{
-                var diff=snaps[k].requests-snaps[k-1].requests;
-                totalReq+=diff>=0?diff:snaps[k].requests;
-              }
-            }
-          }
-        }
-        reqVol.push(totalReq);
+        reqVol.push(Number(dd.requests_today)||0);
       });
       histTrendChart.setOption({tooltip:{trigger:'axis'},legend:{data:['拒绝量','请求量'],textStyle:{fontSize:11}},grid:{left:50,right:16,top:30,bottom:24},xAxis:{type:'category',data:dates,axisLabel:{fontSize:10}},yAxis:[{type:'value',name:'拒绝',axisLabel:{fontSize:10}},{type:'value',name:'请求',axisLabel:{fontSize:10}}],series:[{name:'拒绝量',type:'bar',data:denied,itemStyle:{color:'#e74c3c'}},{name:'请求量',type:'line',yAxisIndex:1,data:reqVol,smooth:true,itemStyle:{color:'#3498db'}}]});
     }
     if(histPieChart){
-      var pieData=[];for(var r in d.totals.denied_by_reason){pieData.push({name:r,value:d.totals.denied_by_reason[r]})}
+        var pieData=[];for(var r in d.totals.denied_by_reason){pieData.push({name:r,value:d.totals.denied_by_reason[r]})}
       histPieChart.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},series:[{type:'pie',radius:['35%','65%'],data:pieData,label:{fontSize:11}}]});
     }
     var ipHtml='<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:6px">IP</th><th style="text-align:right;padding:6px">次数</th></tr>';
@@ -1302,7 +1295,7 @@ local function handle_api_history()
         local fpath = log_dir .. "/" .. fname
         local f = io.open(fpath, "r")
         local day_obj = {date = os.date("%Y-%m-%d", t), found = false,
-                         denied_total = 0, denied_by_reason = {},
+                         denied_total = 0, denied_by_reason = {}, requests_today = 0,
                          blocks = 0, top_ips = {}, snapshots = {}}
         if f then
             day_obj.found = true
@@ -1361,6 +1354,15 @@ local function handle_api_history()
                 totals_ip_count[ip] = (totals_ip_count[ip] or 0) + c
             end
         end
+        -- 每个日期只采用该日 SNAP 明确记录的 requests_today；旧日志没有该字段
+        -- 时显示 0，绝不把长期累计 requests 伪装成当日访问量。
+        local last_day_snap = day_obj.snapshots[#day_obj.snapshots]
+        if last_day_snap and last_day_snap.requests_today ~= nil then
+            day_obj.requests_today = last_day_snap.requests_today
+        end
+        if day_obj.date == os.date("%Y-%m-%d", now) and core and core.get_today_stats then
+            day_obj.requests_today = core.get_today_stats().requests_today or day_obj.requests_today
+        end
         day_results[#day_results+1] = day_obj
     end
     local sorted_totals_ips = {}
@@ -1380,6 +1382,7 @@ local function handle_api_history()
         days = day_results,
         totals = {
             denied = totals_denied,
+            requests_today = day_results[#day_results] and day_results[#day_results].requests_today or 0,
             blocks = totals_blocks,
             denied_by_reason = totals_by_reason,
             top_ips = top_totals_ips,

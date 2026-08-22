@@ -446,14 +446,26 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     try: data=json.loads(result[1])
     except Exception: data={}
     add(out,"webui","dynamic token endpoint JSON",result[0],200,"body keys="+str(sorted(data.keys())))
-    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.11" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
+    add(out,"webui","token reports strict dynamic-only policy and boot_id",None if data.get("key_mode")=="dynamic" and data.get("strict_sign") is True and data.get("dynamic_sign_ratio_fail") is True and "legacy_secret_fallback" not in data and "legacy_cookie_fallback" not in data and data.get("cookie_fallback") is False and data.get("cookie_tag_hex")==32 and data.get("cookie_document_require_fetch_metadata") is False and isinstance(data.get("boot_id"), str) and len(data.get("boot_id")) > 0 and data.get("rfw_version")=="4.3.12" and data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"dynamic-only/strict/fallback/tag/boot_id/version/protocol")
     time_result=h.run(uri="/cgi-rfw/time",now=BASE_NOW)
     try: time_data=json.loads(time_result[1])
     except Exception: time_data={}
-    add(out,"webui","anonymous time endpoint returns server clock and boot_id",None if time_result[0]==200 and time_data.get("server_time")==int(BASE_NOW) and isinstance(time_data.get("boot_id"),str) and len(time_data.get("boot_id"))>0 and time_data.get("rfw_version")=="4.3.11" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"no Key issue or quota consumption")
+    add(out,"webui","anonymous time endpoint returns server clock and boot_id",None if time_result[0]==200 and time_data.get("server_time")==int(BASE_NOW) and isinstance(time_data.get("boot_id"),str) and len(time_data.get("boot_id"))>0 and time_data.get("rfw_version")=="4.3.12" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"no Key issue or quota consumption")
     add(out,"webui","time endpoint rejects non-GET",h.run(method="POST",uri="/cgi-rfw/time",now=BASE_NOW)[0],405,"method guard")
+    status_result=h.run(uri="/cgi-rfw/api/stats",ip="127.0.0.1",now=BASE_NOW)
+    try: status_data=json.loads(status_result[1])
+    except Exception: status_data={}
+    status_stats=status_data.get("stats",{}) if isinstance(status_data,dict) else {}
+    add(out,"webui","status exposes today-only request counter without protocol change",None if status_result[0]==200 and isinstance(status_stats.get("requests_today"),int) and status_stats.get("requests_today",-1) <= status_stats.get("requests",-1) and data.get("rfw_protocol")=="MA-RFW-1" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"today-only stats; protocol remains MA-RFW-1")
+    h.lua.execute('function set_history_days(v) _ngx_var["arg_days"]=v end')
+    h.lua.eval("set_history_days")("1")
+    history_result=h.run(uri="/cgi-rfw/api/history",ip="127.0.0.1",now=BASE_NOW)
+    try: history_data=json.loads(history_result[1])
+    except Exception: history_data={}
+    history_days=history_data.get("days",[]) if isinstance(history_data,dict) else []
+    add(out,"webui","history exposes explicit daily request volume",None if history_result[0]==200 and len(history_days)==1 and isinstance(history_days[0].get("requests_today"),int) else 500,None,"never charts cumulative requests as daily volume")
     page=h.run(uri="/cgi-rfw/config",ip="127.0.0.1")
-    add(out,"webui","version is v4.3.11",None if "<span>v4.3.11</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
+    add(out,"webui","version is v4.3.12",None if "<span>v4.3.12</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
     log_page=h.run(uri="/cgi-rfw/logs",ip="127.0.0.1")
     add(out,"webui","SNAP hidden in log renderer",None if "o.attack_method==='SNAP'" in log_page[1] else 500,None,"frontend defensive filter")
     log_dir=h.work/"logs"; log_dir.mkdir(exist_ok=True)
@@ -583,9 +595,9 @@ def main():
     run_core_tests(repo,cfg,checks); run_cookie_tests(repo,cfg,checks); run_webui_test(repo,cfg,checks); run_saz_test(repo,cfg,saz,checks); run_performance(repo,cfg,checks)
     summary={"total":len(checks),"passed":sum(x.status=="PASS" for x in checks),"failed":sum(x.status=="FAIL" for x in checks),"skipped":sum(x.status=="SKIP" for x in checks),"checks":[asdict(x) for x in checks],"config":str(cfg),"saz":str(saz) if saz else None}
     Path(args.json_out).write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# RFW v4.3.11 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
+    lines=["# RFW v4.3.12 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
     for x in checks: lines.append(f"| {x.suite} | {x.name} | `{x.observed}` | `{x.expected}` | **{x.status}** | {x.detail} |")
-    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.11 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
+    lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.12 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
     Path(args.md_out).write_text("\n".join(lines)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2)); return 0 if summary["failed"]==0 else 1
 
