@@ -35,7 +35,7 @@
     var brokerRoot = (window.top && window.top.location.origin === window.location.origin) ? window.top : window;
     tokenBroker = brokerRoot.__RFW_TOKEN_BROKER__;
     if (!tokenBroker) {
-      tokenBroker = { promise: null, timePromise: null, lastData: null, lastExpiresAt: 0, refreshTimer: null, refreshFn: null, bootId: null, reloadLocked: false };
+      tokenBroker = { promise: null, timePromise: null, lastData: null, lastExpiresAt: 0, refreshTimer: null, refreshFn: null, bootId: null, reloadLocked: false, maintenanceNotified: false };
       Object.defineProperty(brokerRoot, "__RFW_TOKEN_BROKER__", {
         value: tokenBroker, writable: false, configurable: false, enumerable: false
       });
@@ -583,6 +583,8 @@
   // 必须在安装 fetch 拦截器之前保存原始 fetch。否则启动时获取
   // /cgi-rfw/token 会进入“等待 token 才发送 token 请求”的死锁。
   var rawFetch = window.fetch;
+  // 软件发布号和协议版本都属于发布兼容性边界；任一不一致时都要求
+  // 刷新页面，避免旧缓存脚本继续解释已更新的服务端实现。
   var CLIENT_VERSION = "4.3.12";
   var CLIENT_PROTOCOL = "MA-RFW-1";
   var serverVersion = tokenBroker && tokenBroker.version ? tokenBroker.version : null;
@@ -592,17 +594,23 @@
   var reloadDialogShown = false;
 
   function showMaintenancePrompt() {
-    if (reloadDialogShown) return;
-    reloadDialogShown = true;
+    if (tokenBroker) {
+      if (tokenBroker.maintenanceNotified) return;
+      tokenBroker.maintenanceNotified = true;
+    } else {
+      if (reloadDialogShown) return;
+      reloadDialogShown = true;
+    }
     var msg = "系统维护，请刷新页面。";
     try {
-      if (typeof window.alert === "function") window.alert(msg);
+      var promptWindow = (typeof brokerRoot !== "undefined" && brokerRoot && typeof brokerRoot.alert === "function") ? brokerRoot : window;
+      if (typeof promptWindow.alert === "function") promptWindow.alert(msg);
       else if (window.console) window.console.warn("[rfw.js] " + msg);
     } catch (e) {}
   }
 
   function lockForServerReload(signal) {
-    if (reloadLocked || (tokenBroker && tokenBroker.reloadLocked)) return;
+    if (isReloadLocked()) return;
     reloadLocked = true;
     if (tokenBroker) tokenBroker.reloadLocked = true;
     dynKey = null;
@@ -665,7 +673,7 @@
   }
 
   function requestTokenRecovery(force) {
-    if (reloadLocked) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
+    if (isReloadLocked()) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
     var now = Date.now();
     if (!force && now - lastRecoveryAt < 1000) return tokenInFlight || Promise.resolve(null);
     lastRecoveryAt = now;
@@ -817,12 +825,13 @@
   }
 
   function enterNoKeyMode() {
-    if (reloadLocked) return;
+    if (isReloadLocked()) return;
     dynNoKey  = true;
     dynKey    = null;
     dynReady  = false;
     pendingQueue = [];
-    showMaintenancePrompt();
+    // Token 暂时不可用时仍严格停止未签名业务请求，但这是可恢复的
+    // 运行状态，不应冒充协议不兼容并要求用户刷新页面。
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(function () {
       retryTimer = null;
@@ -917,13 +926,13 @@
 
   installInterceptors(
     function () {
-      if (reloadLocked) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
+      if (isReloadLocked()) return Promise.reject(new Error("RFW_RELOAD_REQUIRED"));
       return new Promise(function (resolve) {
         var resolved = false;
         var timer = setTimeout(function () {
           if (resolved) return;
           resolved = true;
-          if (reloadLocked) return;
+          if (isReloadLocked()) return;
           if (window.console) console.warn("[rfw.js] 密钥获取超时(5s)，停止未签名业务请求");
           if (!dynReady) {
             dynNoKey = true;
@@ -954,19 +963,19 @@
     },
     function () {
       syncTokenFromBroker();
-      return (dynNoKey || reloadLocked || brokerRefreshPending()) ? null : dynKey;
+      return (dynNoKey || isReloadLocked() || brokerRefreshPending()) ? null : dynKey;
     },
     function () { return dynClockOff; },
     function () {
       syncTokenFromBroker();
-      return dynReady && !reloadLocked && !brokerRefreshPending() && !!dynKey && Date.now() <= dynExpiresAt - 30000;
+      return dynReady && !isReloadLocked() && !brokerRefreshPending() && !!dynKey && Date.now() <= dynExpiresAt - 30000;
     }
   );
 
   // 自动恢复: 页面可见/focus 时重新取 token
   ["pageshow", "visibilitychange", "focus"].forEach(function (ev) {
     window.addEventListener(ev, function () {
-      if (reloadLocked) return;
+      if (isReloadLocked()) return;
       if (!dynKey || Date.now() > dynExpiresAt - 30000) {
         dynReady = false;
         dynNoKey = false;

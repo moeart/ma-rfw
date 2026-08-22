@@ -55,7 +55,7 @@ function makeContext(options = {}) {
     dispatchEvent: function (name) {
       for (const fn of (listeners[name] || [])) fn();
     },
-    alert: function (message) { calls.alert = message; },
+    alert: function (message) { calls.alert = message; calls.alerts = (calls.alerts || 0) + 1; },
     console: { log() {}, warn() {} }
   };
   window.location = { origin: 'http://localhost', href: 'http://localhost/webapp/' };
@@ -285,21 +285,50 @@ function makeContext(options = {}) {
   outage.runTimers(5000);
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  if (outageXhr.sent || outageCalls.business !== 0 || outageCalls.token < 2) {
+  if (outageXhr.sent || outageCalls.business !== 0 || outageCalls.token < 2 || outageCalls.alerts) {
     throw new Error('token-outage async XHR was not fail-closed: ' + JSON.stringify({ calls: outageCalls, sent: outageXhr.sent }));
   }
 
-  // 旧服务端协议/版本必须 fail-closed，并只显示通用维护提示。
+  // 软件发布号不一致也属于发布兼容性边界，必须在业务请求前 fail-closed。
+  const versionCalls = { token: 0, business: 0 };
+  const versionTop = { location: { origin: 'http://localhost' } };
+  const versionMain = makeContext({
+    calls: versionCalls, topWindow: versionTop,
+    tokenResponses: [{ key: 'same-protocol-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.11', rfw_protocol: 'MA-RFW-1' }]
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  let versionBlocked = false;
+  try { await versionMain.window.fetch('/webapp/version-mismatch', { method: 'GET' }); } catch (e) { versionBlocked = true; }
+  if (!versionBlocked || versionCalls.business !== 0 || versionCalls.alerts !== 1 || versionCalls.token !== 1) {
+    throw new Error('software version mismatch did not fail-closed: ' + JSON.stringify(versionCalls));
+  }
+
+  // 真正的协议失配仍必须 fail-closed；同源主框架与 iframe 合计只可提示一次。
+  const protocolCalls = { token: 0, business: 0 };
+  const protocolTop = { location: { origin: 'http://localhost' } };
+  const protocolMain = makeContext({
+    calls: protocolCalls, topWindow: protocolTop,
+    tokenResponses: [{ key: 'bad-protocol-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'boot-a', rfw_version: '4.3.12', rfw_protocol: 'MA-RFW-2' }]
+  });
+  const protocolFrame = makeContext({ calls: protocolCalls, topWindow: protocolTop });
+  await new Promise(resolve => setImmediate(resolve));
+  let protocolBlocked = false;
+  try { await protocolMain.window.fetch('/webapp/protocol-mismatch', { method: 'GET' }); } catch (e) { protocolBlocked = true; }
+  if (!protocolBlocked || protocolCalls.business !== 0 || protocolCalls.alerts !== 1 || protocolCalls.token !== 1) {
+    throw new Error('protocol mismatch did not fail-closed with one shared alert: ' + JSON.stringify(protocolCalls));
+  }
+
+  // 旧协议必须 fail-closed，并只显示通用维护提示。
   const oldCalls = { token: 0, business: 0 };
   const old = makeContext({
     calls: oldCalls,
-    tokenResponses: [{ key: 'old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'old-boot', rfw_version: '4.3.4', rfw_protocol: 'MA-RFW-1' }]
+    tokenResponses: [{ key: 'old-key', expires_in: 1800, server_time: Math.floor(Date.now() / 1000), cookie_ttl: 86400, cookie_tag_hex: 32, boot_id: 'old-boot', rfw_version: '4.3.12', rfw_protocol: 'MA-RFW-0' }]
   });
   await new Promise(resolve => setImmediate(resolve));
   let oldBlocked = false;
   try { await old.window.fetch('/webapp/api-old-server', { method: 'GET' }); } catch (e) { oldBlocked = true; }
   if (!oldBlocked || oldCalls.business !== 0 || oldCalls.token !== 1 || oldCalls.alert !== '系统维护，请刷新页面。') {
-    throw new Error('old server protocol guard failed: ' + JSON.stringify(oldCalls));
+    throw new Error('old protocol guard failed: ' + JSON.stringify(oldCalls));
   }
   console.log('PASS dynamic async/sync XHR, authorized one-shot fetch resign, iframe-first Broker Token synchronization, unauthorized 403 no-retry, Token-outage XHR fail-closed, duplicate-load Token dedupe, same-origin Broker, boot auto-refresh, and old-protocol fail-closed');
 })().catch(err => { console.error(err); process.exit(1); });

@@ -456,21 +456,25 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     try: status_data=json.loads(status_result[1])
     except Exception: status_data={}
     status_stats=status_data.get("stats",{}) if isinstance(status_data,dict) else {}
-    add(out,"webui","status exposes today-only request counter without protocol change",None if status_result[0]==200 and isinstance(status_stats.get("requests_today"),int) and status_stats.get("requests_today",-1) <= status_stats.get("requests",-1) and data.get("rfw_protocol")=="MA-RFW-1" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"today-only stats; protocol remains MA-RFW-1")
-    h.lua.execute('function set_history_days(v) _ngx_var["arg_days"]=v end')
-    h.lua.eval("set_history_days")("1")
-    history_result=h.run(uri="/cgi-rfw/api/history",ip="127.0.0.1",now=BASE_NOW)
-    try: history_data=json.loads(history_result[1])
-    except Exception: history_data={}
-    history_days=history_data.get("days",[]) if isinstance(history_data,dict) else []
-    add(out,"webui","history exposes explicit daily request volume",None if history_result[0]==200 and len(history_days)==1 and isinstance(history_days[0].get("requests_today"),int) else 500,None,"never charts cumulative requests as daily volume")
+    add(out,"webui","status preserves total request counter and protocol",None if status_result[0]==200 and isinstance(status_stats.get("requests"),int) and isinstance(status_stats.get("requests_today"),int) and status_stats.get("requests_today",-1) <= status_stats.get("requests",-1) and data.get("rfw_protocol")=="MA-RFW-1" and time_data.get("rfw_protocol")=="MA-RFW-1" else 500,None,"Status total remains cumulative; protocol remains MA-RFW-1")
+    status_page=h.run(uri="/cgi-rfw/status",ip="127.0.0.1")
+    add(out,"webui","status page keeps cumulative request total",None if status_page[0]==200 and "请求总数" in status_page[1] and "fmt(s.requests)" in status_page[1] and "今日访问量" not in status_page[1] else 500,None,"homepage metric is cumulative requests")
+    add(out,"webui","history trend uses two line series",None if "name:'拒绝量',type:'line'" in status_page[1] and "name:'请求量',type:'line'" in status_page[1] else 500,None,"denied and request volume are dual lines")
     page=h.run(uri="/cgi-rfw/config",ip="127.0.0.1")
     add(out,"webui","version is v4.3.12",None if "<span>v4.3.12</span>" in page[1] and "3.0.0" not in page[1] else 500,None,"WebUI brand version")
     log_page=h.run(uri="/cgi-rfw/logs",ip="127.0.0.1")
     add(out,"webui","SNAP hidden in log renderer",None if "o.attack_method==='SNAP'" in log_page[1] else 500,None,"frontend defensive filter")
     log_dir=h.work/"logs"; log_dir.mkdir(exist_ok=True)
-    log_name="rfw_"+time.strftime("%Y-%m-%d")+".log"
-    (log_dir/log_name).write_text(json.dumps({"attack_method":"SNAP","local_time":"2026-08-19 00:00:00"})+"\n"+json.dumps({"attack_method":"cookie-tampered","req_url":"/"})+"\n",encoding="utf-8")
+    history_day=time.localtime(time.time()-86400)
+    history_date=time.strftime("%Y-%m-%d",history_day)
+    log_name="rfw_"+history_date+".log"
+    old_snaps=[
+        {"attack_method":"SNAP","local_time":"2026-08-19 00:00:00","req_data":"requests=100 signed_ok=80"},
+        {"attack_method":"SNAP","local_time":"2026-08-19 08:00:00","req_data":"requests=180 signed_ok=150"},
+        {"attack_method":"SNAP","local_time":"2026-08-19 16:00:00","req_data":"requests=260 signed_ok=220"},
+        {"attack_method":"cookie-tampered","req_url":"/"},
+    ]
+    (log_dir/log_name).write_text("\n".join(json.dumps(x) for x in old_snaps)+"\n",encoding="utf-8")
     h.lua.execute('function set_log_args(f) _ngx_var["arg_file"]=f; _ngx_var["arg_lines"]="100" end')
     h.lua.eval("set_log_args")(log_name)
     log_result=h.run(uri="/cgi-rfw/api/log",ip="127.0.0.1")
@@ -478,6 +482,14 @@ def run_webui_test(repo: Path, config_path: Path, out: list[Check]):
     except Exception: log_json={}
     log_lines=log_json.get("lines",[]) if isinstance(log_json,dict) else []
     add(out,"webui","SNAP filtered from log API",None if log_result[0]==200 and len(log_lines)==1 and all('SNAP' not in x for x in log_lines) else 500,None,"server-side log filter")
+    h.lua.execute('function set_history_days(v) _ngx_var["arg_days"]=v end')
+    h.lua.eval("set_history_days")("2")
+    history_result=h.run(uri="/cgi-rfw/api/history",ip="127.0.0.1",now=BASE_NOW)
+    try: history_data=json.loads(history_result[1])
+    except Exception: history_data={}
+    history_days=history_data.get("days",[]) if isinstance(history_data,dict) else []
+    history_requests=next((day.get("requests_today") for day in history_days if isinstance(day,dict) and day.get("date")==history_date),None)
+    add(out,"webui","history derives old SNAP daily request increment",None if history_result[0]==200 and history_requests==160 else 500,None,"last requests 260 - first requests 100 = 160")
     required_ids=["strict-api-path-tags","document-path-tags","strict-api-path-input","document-path-input","cfg-cookie-document-require-fetch","cfg-cookie-ratio-req","cfg-cookie-ratio-min","help-text"]
     hidden_ids=["cfg-key-mode","cfg-dynamic-strict-sign","cfg-dynamic-sign-ratio-fail","cfg-dynamic-allow-cookie-fallback","cfg-dynamic-cookie-tag-hex","cfg-cookie-name","cfg-cookie-bootstrap","cfg-cookie-safe-methods","cfg-replay-enabled"]
     add(out,"webui","config page uses Chinese editable fields",None if all(x in page[1] for x in required_ids) and all(x not in page[1] for x in hidden_ids) and "Cookie" in page[1] else 500,None,"visible="+str(required_ids)+", hidden_fixed="+str(hidden_ids))
@@ -595,7 +607,7 @@ def main():
     run_core_tests(repo,cfg,checks); run_cookie_tests(repo,cfg,checks); run_webui_test(repo,cfg,checks); run_saz_test(repo,cfg,saz,checks); run_performance(repo,cfg,checks)
     summary={"total":len(checks),"passed":sum(x.status=="PASS" for x in checks),"failed":sum(x.status=="FAIL" for x in checks),"skipped":sum(x.status=="SKIP" for x in checks),"checks":[asdict(x) for x in checks],"config":str(cfg),"saz":str(saz) if saz else None}
     Path(args.json_out).write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# RFW v4.3.12 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|---|"]
+    lines=["# RFW v4.3.12 统一测试报告","",f"总检查 **{summary['total']}**；通过 **{summary['passed']}**；失败 **{summary['failed']}**；跳过 **{summary['skipped']}**。","","| 套件 | 检查项 | 观察 | 期望 | 状态 | 说明 |","|---|---|---:|---:|---|"]
     for x in checks: lines.append(f"| {x.suite} | {x.name} | `{x.observed}` | `{x.expected}` | **{x.status}** | {x.detail} |")
     lines += ["","## 运行边界","","这是本地 Lua/OpenResty 核心模拟，不会向生产发送请求。`ALLOW` 只代表 RFW 层放行，不代表业务授权成功。v4.3.12 dynamic-only 严格模式要求非文档请求携带当前 dynamic MA-RFW-Data；默认 `dynamic_allow_cookie_fallback=false`，仅在管理员显式开启、请求方法为 GET/HEAD/OPTIONS 且已有有效 dynamic `_RFW` Cookie 时进入有限 Cookie 兼容例外。安全方法同值最多 8 次，写请求始终需要 MA-RFW-Data。","", "## 标准 JSON 备注与固定策略","","测试工具验证标准 JSON 中的 `__COMMENT_*` 备注字段会被运行时忽略。dynamic-only、MA-RFW-Data 严格校验、Cookie 名称、安全方法和重放检测开关等固定策略不写入配置；重新注入固定字段会被运行时拒绝。","", "## 性能说明","","性能数字是本地 Lupa + Lua shared-dict mock 的相对基线，不代表生产 QPS。核心路径没有 shared-dict 全量扫描或 token rotate；每个动态请求最多一次 key record 读取和一次 HMAC 链。"]
     Path(args.md_out).write_text("\n".join(lines)+"\n",encoding="utf-8")

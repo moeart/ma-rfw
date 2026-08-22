@@ -407,7 +407,7 @@ local STATUS_HTML = [[<!DOCTYPE html>
 ]] .. NAV .. [[
 <main>
     <div class="metrics">
-    <div class="metric-card purple"><div class="label">今日访问量</div><div class="value" id="m-total">-</div></div>
+    <div class="metric-card purple"><div class="label">请求总数</div><div class="value" id="m-total">-</div></div>
     <div class="metric-card green"><div class="label">签名校验通过</div><div class="value" id="m-signed">-</div></div>
     <div class="metric-card yellow"><div class="label">cookie 兜底放行</div><div class="value" id="m-cookie">-</div></div>
     <div class="metric-card red"><div class="label">封禁命中</div><div class="value" id="m-blocked">-</div></div>
@@ -528,7 +528,7 @@ function renderSys(s){
 function refresh(){
   fetch('/cgi-rfw/api/stats?t='+Date.now()).then(function(r){return r.json()}).then(function(d){
     var s=d.stats||{};var bl=d.block_log||{};
-    document.getElementById('m-total').textContent=fmt(s.requests_today);
+    document.getElementById('m-total').textContent=fmt(s.requests);
     document.getElementById('m-signed').textContent=fmt(s.signed_ok);
     document.getElementById('m-cookie').textContent=fmt(s.cookie_ok);
     document.getElementById('m-blocked').textContent=fmt(s.blocked_hit);
@@ -558,7 +558,7 @@ function loadHistory(days){
         denied.push(dd.denied_total);
         reqVol.push(Number(dd.requests_today)||0);
       });
-      histTrendChart.setOption({tooltip:{trigger:'axis'},legend:{data:['拒绝量','请求量'],textStyle:{fontSize:11}},grid:{left:50,right:16,top:30,bottom:24},xAxis:{type:'category',data:dates,axisLabel:{fontSize:10}},yAxis:[{type:'value',name:'拒绝',axisLabel:{fontSize:10}},{type:'value',name:'请求',axisLabel:{fontSize:10}}],series:[{name:'拒绝量',type:'bar',data:denied,itemStyle:{color:'#e74c3c'}},{name:'请求量',type:'line',yAxisIndex:1,data:reqVol,smooth:true,itemStyle:{color:'#3498db'}}]});
+      histTrendChart.setOption({tooltip:{trigger:'axis'},legend:{data:['拒绝量','请求量'],textStyle:{fontSize:11}},grid:{left:50,right:16,top:30,bottom:24},xAxis:{type:'category',data:dates,axisLabel:{fontSize:10}},yAxis:[{type:'value',name:'拒绝',axisLabel:{fontSize:10}},{type:'value',name:'请求',axisLabel:{fontSize:10}}],series:[{name:'拒绝量',type:'line',data:denied,smooth:true,symbol:'circle',symbolSize:7,itemStyle:{color:'#e74c3c'},lineStyle:{width:3}},{name:'请求量',type:'line',yAxisIndex:1,data:reqVol,smooth:true,symbol:'circle',symbolSize:7,itemStyle:{color:'#3498db'},lineStyle:{width:3}}]});
     }
     if(histPieChart){
         var pieData=[];for(var r in d.totals.denied_by_reason){pieData.push({name:r,value:d.totals.denied_by_reason[r]})}
@@ -1354,11 +1354,17 @@ local function handle_api_history()
                 totals_ip_count[ip] = (totals_ip_count[ip] or 0) + c
             end
         end
-        -- 每个日期只采用该日 SNAP 明确记录的 requests_today；旧日志没有该字段
-        -- 时显示 0，绝不把长期累计 requests 伪装成当日访问量。
+        -- 新 SNAP 直接记录当日访问量。旧 SNAP 只存长期累计 requests，
+        -- 必须取同一天首末快照的差值，绝不能直接把累计值画成当日访问量。
         local last_day_snap = day_obj.snapshots[#day_obj.snapshots]
         if last_day_snap and last_day_snap.requests_today ~= nil then
             day_obj.requests_today = last_day_snap.requests_today
+        else
+            local first_day_snap = day_obj.snapshots[1]
+            if first_day_snap and last_day_snap and first_day_snap.requests ~= nil and last_day_snap.requests ~= nil then
+                local diff = last_day_snap.requests - first_day_snap.requests
+                day_obj.requests_today = diff >= 0 and diff or last_day_snap.requests
+            end
         end
         if day_obj.date == os.date("%Y-%m-%d", now) and core and core.get_today_stats then
             day_obj.requests_today = core.get_today_stats().requests_today or day_obj.requests_today
